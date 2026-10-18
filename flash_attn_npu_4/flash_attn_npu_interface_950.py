@@ -34,6 +34,11 @@ else:
     _torch_register_fake_wrapper = _noop_register_fake_wrapper
 
 
+_LAYOUT_TND = 0
+_LAYOUT_BSND = 1
+_LAYOUT_BNSD = 2
+
+
 def _maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
@@ -47,6 +52,41 @@ def _full_contiguous(x):
 
 def _window_to_npu(window_size: Optional[int]) -> int:
     return -1 if window_size is None else int(window_size)
+
+
+def _transposed_bnsd_view(t):
+    """``t.transpose(1, 2)`` if ``t`` is a contiguous BNSD tensor seen as BSND, else ``None``."""
+    if t is None or t.dim() != 4 or t.is_contiguous():
+        return None
+    _, n1, _, n3 = t.shape
+    if t.stride(3) == 1 and t.stride(1) == n3 and t.stride(2) == n1 * n3:
+        return t.transpose(1, 2)
+    return None
+
+
+def _detect_layout(q, k, v, page_table, cu_seqlens_k):
+    """Return ``(layout, q, k, v, out_transposed)``: the layout code shared with the C++
+    host, the operands to hand the kernel, and whether ``out`` must be transposed back to
+    match the shape of the query the caller passed in.
+
+    Only a stride match selects BNSD; otherwise rank-4 operands are read as BSND. Paged and
+    cu-packed (TND) Q/K/V are never BNSD.
+    """
+    if k is not None and v is not None and v.dim() != k.dim():
+        raise RuntimeError(
+            "flash_attn_npu_4_950: key and value must have the same rank for layout detection"
+        )
+
+    if q.dim() != 4 or k.dim() != 4 or page_table is not None or cu_seqlens_k is not None:
+        return _LAYOUT_BSND, q, k, v, False
+
+    q_bnsd = _transposed_bnsd_view(q)
+    k_bnsd = _transposed_bnsd_view(k)
+    v_bnsd = _transposed_bnsd_view(v)
+    if q_bnsd is not None and k_bnsd is not None and v_bnsd is not None:
+        return _LAYOUT_BNSD, q_bnsd, k_bnsd, v_bnsd, True
+
+    return _LAYOUT_BSND, q, k, v, False
 
 
 # Ascend950 FA4 metadata contains only serialized FAInferStaticTilingData. Keep
@@ -241,6 +281,7 @@ def _flash_attn_forward(
     pack_gqa: Optional[bool] = None,
     return_lse: bool = False,
     scheduler_metadata: Optional[torch.Tensor] = None,
+    layout: int = _LAYOUT_BSND,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k = (_maybe_contiguous(x) for x in (q, k))
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
@@ -273,6 +314,7 @@ def _flash_attn_forward(
         learnable_sink,
         return_lse,
         scheduler_metadata,
+        layout,
     )
 
     if out_accum is None:
@@ -502,21 +544,33 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        batch_size = q.shape[0]
-        seqused_k = torch.full((batch_size,), k.shape[1], dtype=torch.int32, device=q.device)
+        # get_scheduler_metadata only takes numbers and reads them as BSND, so the sizes
+        # below come from the pre-detection shapes; BNSD only re-views the same storage.
+        batch_size, seqlen_q, nheads, headdim = q.shape
+        seqlen_k, nheads_kv = k.shape[1], k.shape[2]
+        headdim_v = v.shape[-1]
+
+        layout, q, k, v, out_transposed = _detect_layout(q, k, v, None, None)
+
+        seqused_k = torch.full(
+            (batch_size,),
+            seqlen_k,
+            dtype=torch.int32,
+            device=q.device,
+        )
 
         # Precompute the scheduler metadata, including FlashDecode schedules
         # when eligible, on the AICPU so the forward launch needs no
         # device->host->device round trip.
         if scheduler_metadata is None and not disable_scheduler_metadata:
             scheduler_metadata = get_scheduler_metadata(
-                max_seqlen_q=q.shape[1],
-                max_seqlen_k=k.shape[1],
-                nheads=q.shape[2],
-                nheads_kv=k.shape[2],
-                headdim=q.shape[3],
+                max_seqlen_q=seqlen_q,
+                max_seqlen_k=seqlen_k,
+                nheads=nheads,
+                nheads_kv=nheads_kv,
+                headdim=headdim,
                 num_splits=num_splits,
-                headdim_v=v.shape[-1],
+                headdim_v=headdim_v,
                 pack_gqa=pack_gqa,
                 causal=causal,
                 window_size_left=window_size[0],
@@ -549,9 +603,11 @@ class FlashAttnFunc(torch.autograd.Function):
             pack_gqa,
             True,
             scheduler_metadata,
+            layout,
         )
 
         ctx.save_for_backward(q, k, v, out, softmax_lse)
+        ctx.layout = layout
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -569,12 +625,19 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.aux_tensors = aux_tensors
         ctx.aux_scalars = aux_scalars
 
+        if out_transposed:
+            # Report the result in the shape the caller passed in, not the BNSD view.
+            out = out.transpose(1, 2)
         if return_lse:
             return out, softmax_lse
         return out
 
     @staticmethod
     def backward(ctx, dout, *args):
+        if getattr(ctx, "layout", _LAYOUT_BSND) == _LAYOUT_BNSD:
+            raise NotImplementedError(
+                "flash_attn_npu_4_950: BNSD layout only supports the forward pass"
+            )
         q, k, v, out, softmax_lse = ctx.saved_tensors
         dlse = args[0] if ctx.return_lse and len(args) > 0 else None
         if dlse is not None and torch.is_tensor(dlse) and float(dlse.detach().abs().sum()) == 0.0:
@@ -681,6 +744,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     ):
         assert k.stride(-1) == 1, "k must have contiguous last dimension"
         assert v.stride(-1) == 1, "v must have contiguous last dimension"
+        # BNSD is not a varlen layout, so this path only picks TND or BSND.
+        layout = _LAYOUT_TND if cu_seqlens_q is not None else _LAYOUT_BSND
 
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -764,6 +829,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             pack_gqa,
             True,
             scheduler_metadata,
+            layout,
         )
 
         ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k,
@@ -948,6 +1014,7 @@ def _flash_attn_forward_fake(
     pack_gqa: Optional[bool] = None,
     return_lse: bool = False,
     scheduler_metadata: Optional[torch.Tensor] = None,
+    layout: int = _LAYOUT_BSND,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Metadata-only fake for V4 A3 forward. Returns 4-tuple."""
     is_varlen_q = cu_seqlens_q is not None
@@ -960,6 +1027,21 @@ def _flash_attn_forward_fake(
         out = torch.empty((total_q, num_heads, head_size_v), dtype=out_dtype, device=q.device)
         if return_lse:
             softmax_lse = torch.empty((num_heads, total_q), dtype=torch.float32, device=q.device)
+        else:
+            softmax_lse = torch.empty((0,), dtype=torch.float32, device=q.device)
+    elif layout == _LAYOUT_BNSD:
+        batch_size, num_heads, seqlen_q = q.shape[0], q.shape[1], q.shape[2]
+        out = torch.empty(
+            (batch_size, num_heads, seqlen_q, head_size_v),
+            dtype=out_dtype,
+            device=q.device,
+        )
+        if return_lse:
+            softmax_lse = torch.empty(
+                (batch_size, num_heads, seqlen_q),
+                dtype=torch.float32,
+                device=q.device,
+            )
         else:
             softmax_lse = torch.empty((0,), dtype=torch.float32, device=q.device)
     else:

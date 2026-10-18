@@ -21,6 +21,8 @@
 #include <limits>
 #include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 #include <c10/core/Device.h>
 #include <torch/extension.h>
 
@@ -54,7 +56,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                 bool is_causal, int64_t window_size_left, int64_t window_size_right,
                                 int64_t attention_chunk, float softcap, bool is_rotary_interleaved,
                                 std::optional<at::Tensor> scheduler_metadata_, int64_t num_splits,
-                                std::optional<bool> pack_gqa_, int64_t sm_margin, bool return_softmax_lse)
+                                std::optional<bool> pack_gqa_, int64_t sm_margin, bool return_softmax_lse,
+                                int64_t layout)
 {
     // ============================================================
     // 0. Device guard + stream + AIC core count
@@ -173,18 +176,54 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
         seqlen_q = static_cast<int>(max_seqlen_q_.value());
         num_heads = static_cast<int>(sizes[1]);
         head_size_q = static_cast<int>(sizes[2]);
+    }
+
+    // 4b. Layout (FwdLayout, resolved by the Python caller; Q/K/V share one layout)
+    TORCH_CHECK(layout >= static_cast<int64_t>(FwdLayout::TND) &&
+                    layout <= static_cast<int64_t>(FwdLayout::BNSD),
+                "950 backend (v3) received an unsupported layout code (", layout, ")");
+    const FwdLayout layout_enum = static_cast<FwdLayout>(layout);
+    TORCH_CHECK((layout_enum == FwdLayout::TND) == is_varlen_q,
+                "950 backend (v3) layout code conflicts with cu_seqlens_q: TND requires it, "
+                "BSND and BNSD forbid it");
+
+    if (layout_enum == FwdLayout::TND) {
+        batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
+        seqlen_q = static_cast<int>(max_seqlen_q_.value());
+        num_heads = static_cast<int>(sizes[1]);
+        head_size_q = static_cast<int>(sizes[2]);
     } else {
         batch_size = static_cast<int>(sizes[0]);
-        seqlen_q = static_cast<int>(sizes[1]);
-        num_heads = static_cast<int>(sizes[2]);
         head_size_q = static_cast<int>(sizes[3]);
+        if (layout_enum == FwdLayout::BNSD) {
+            num_heads = static_cast<int>(sizes[1]);
+            seqlen_q = static_cast<int>(sizes[2]);
+        } else {
+            num_heads = static_cast<int>(sizes[2]);
+            seqlen_q = static_cast<int>(sizes[1]);
+        }
     }
+
+    int64_t kv_seqlen_allocated = 0;
+    if (layout_enum == FwdLayout::BNSD) {
+        // BNSD requires Q, K and V to share the same rank-4 (B, H, S, D) layout.
+        TORCH_CHECK(!paged_KV && !is_varlen_kv && k.dim() == 4 && v.dim() == 4,
+                    "950 backend (v3) BNSD layout requires rank-4, non-paged key/value tensors with "
+                    "the same (B, H, S, D) layout as the query");
+        kv_seqlen_allocated = static_cast<int64_t>(k.size(2));
+        TORCH_CHECK(k.size(0) == v.size(0) && k.size(1) == v.size(1) && k.size(2) == v.size(2),
+                    "950 backend (v3) BNSD key and value must share batch, head and sequence dimensions "
+                    "(the head dimension may differ)");
+    }
+
     const int max_num_blocks_per_seq = !paged_KV ? 0 : static_cast<int>(page_table.size(1));
     const int num_blocks = !paged_KV ? 0 : static_cast<int>(k.size(0));
     const int page_block_size = !paged_KV ? 128 : static_cast<int>(k.size(1));
     // k is 3D TND for flash_attn_varlen_func, but 4D
     // (batch/num_blocks, seqlen/block, kv_heads, head) for flash_attn_with_kvcache.
-    const int num_heads_k = static_cast<int>(k.dim() == 3 ? k.size(1) : k.size(2));
+    const int num_heads_k = layout_enum == FwdLayout::BNSD
+                                ? static_cast<int>(k.size(1))
+                                : static_cast<int>(k.dim() == 3 ? k.size(1) : k.size(2));
     const int head_size_v = static_cast<int>(v.size(-1));
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
@@ -256,6 +295,10 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
             kvSeqlenBound = static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size;
         } else if (is_varlen_q) {
             kvSeqlenBound = k.size(0); // 3D TND non-paged: total_kv is an upper bound
+        } else if (layout_enum == FwdLayout::BNSD) {
+            // BNSD stores the sequence on dim2 (heads live on dim1), so the KV
+            // bound must not be read from dim1 here.
+            kvSeqlenBound = k.size(2);
         } else {
             kvSeqlenBound = k.size(1);
         }
@@ -293,6 +336,11 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
             for (int i = 0; i < batch_size; ++i) {
                 max_kv_seqlen = std::max(max_kv_seqlen, seqlens_k_ptr[i]);
             }
+        }
+        if (layout_enum == FwdLayout::BNSD) {
+            TORCH_CHECK(static_cast<int64_t>(max_kv_seqlen) <= kv_seqlen_allocated,
+                        "950 backend (v3) BNSD KV sequence dimension (", kv_seqlen_allocated,
+                        ") is too small to cover the actual KV length (", max_kv_seqlen, ")");
         }
         if (max_kv_seqlen > 0 && window_size_left >= max_kv_seqlen) {
             window_size_left = -1;
@@ -348,7 +396,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                /* window_size_right= */ is_local ? window_size_right : 0, is_varlen_q, is_bf16,
                                batch_size, seqlen_q, num_heads, num_heads_k, head_size_q, head_size_v,
                                softmax_scale_.value_or(1.0f / std::sqrt(static_cast<float>(head_size_q))), softcap,
-                               return_softmax_lse, is_varlen_q);
+                               return_softmax_lse, layout_enum);
         ctx.flashDecodeFlag = flash_decode;
         ctx.numSplits = static_cast<uint32_t>(num_splits);
 
@@ -401,7 +449,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     // 10. Launch via launch_fwd (inside a torch_npu op context so the launch
     //     can be captured by NPUGraph)
     // ============================================================
-    const Format fmt = is_varlen_q ? Format::TND : Format::BSND;
+    const Format fmt = static_cast<Format>(layout_enum);
     const MaskCategory mask_category =
         is_local ? MaskCategory::MASK_SWA : (is_causal ? MaskCategory::MASK_CAUSAL : MaskCategory::NO_MASK);
 
@@ -446,8 +494,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     auto seqUsedQDev = seqused_q_.has_value() ? static_cast<uint8_t*>(seqused_q_.value().data_ptr()) : nullptr;
     auto seqUsedKvDev = seqused_k_.has_value() ? static_cast<uint8_t*>(seqused_k_.value().data_ptr()) : nullptr;
     auto blockTableDev = paged_KV ? static_cast<uint8_t*>(page_table.data_ptr()) : nullptr;
-    const bool enableDN =
-        !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) && (head_size_v <= 256);
+    const bool enableDN = !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) &&
+                          (head_size_v <= 256);
 
     const float softmax_scale = softmax_scale_.value_or(1.0f / std::sqrt(static_cast<float>(head_size_q)));
     const float scale_value = is_softcap ? softmax_scale / softcap : softmax_scale;
@@ -479,7 +527,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                 scale_value,
                                 softcap,
                                 static_cast<uint32_t>(num_blocks),
-                                static_cast<uint32_t>(max_num_blocks_per_seq)};
+                                static_cast<uint32_t>(max_num_blocks_per_seq),
+                                kv_seqlen_allocated};
     auto launch_fa_infer = [fwdArgs, seqused_q_, seqused_k_]() -> int {
         launch_fwd(fwdArgs);
         return 0;

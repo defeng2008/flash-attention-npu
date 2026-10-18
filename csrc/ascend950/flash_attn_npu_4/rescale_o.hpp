@@ -318,7 +318,8 @@ public:
     void ScatterGroupedOutput(TensorDst &gOTensor, uint32_t qSBlockSize,
                               uint32_t rowStart, uint32_t rowCount,
                               uint32_t embedV, uint32_t outputStride,
-                              uint32_t colStride, uint32_t fullyMaskedRowsPerHead)
+                              uint32_t oHeadStride, uint32_t colStride,
+                              uint32_t fullyMaskedRowsPerHead)
     {
         auto gO = gOTensor.data();
         // zero fully-masked Q rows in UB (causal Sq>Sk).
@@ -353,7 +354,7 @@ public:
             uint32_t rowsThisHead = qSBlockSize - localS;
             rowsThisHead = rowsThisHead < remainingRows ? rowsThisHead : remainingRows;
             AscendC::DataCopyPad(
-                gO[head * embedV + localS * outputStride],
+                gO[head * oHeadStride + localS * outputStride],
                 goUbTensor16[ubRowOffset * colStride],
                 AscendC::DataCopyExtParams(rowsThisHead, embedV * sizeof(ElementO), 0,
                     (outputStride - embedV) * sizeof(ElementO), 0));
@@ -928,6 +929,7 @@ public:
                     uint32_t qNBlockSize,
                     uint32_t lseHeadStride,
                     uint32_t outputStride,
+                    uint32_t oHeadStride,
                     int32_t delStartRow = 0,
                     int32_t delEndRow = 0,
                     uint32_t qSeqlen = 0,
@@ -1000,7 +1002,7 @@ public:
         if (!writePartial && qNBlockSize > 1U && rowNumCurSubCore > 0U && isLastKvSTile) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
             ScatterGroupedOutput(gOTensor, qSBlockSize, rowOffsetCurSubCore,
-                rowNumCurSubCore, colNumOri, outputStride, colStrideCurSubCore,
+                rowNumCurSubCore, colNumOri, outputStride, oHeadStride, colStrideCurSubCore,
                 fullyMaskedRowsPerHead);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
         }

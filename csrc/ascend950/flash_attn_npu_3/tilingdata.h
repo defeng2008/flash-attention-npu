@@ -14,6 +14,12 @@
 
 #include <cstdint>
 
+enum class FwdLayout : uint32_t {
+    TND = 0,
+    BSND = 1,
+    BNSD = 2,
+};
+
 struct coreNode {
     int startBIdx;
     int startN1Idx;

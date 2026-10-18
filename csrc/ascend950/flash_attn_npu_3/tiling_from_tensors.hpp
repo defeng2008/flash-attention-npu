@@ -12,6 +12,8 @@
 #include <ATen/ATen.h>
 #include <c10/util/Optional.h>
 
+#include "tilingdata.h"
+
 namespace flash_attn_npu_950_v3 {
 struct SeqlenScratch {
     std::vector<int32_t> q;   // Q seqlen list (cumulative for TND, per-batch for BSND)
@@ -116,7 +118,7 @@ inline void fill_inference_context(
     float softmax_scale,
     float softcapValue,
     bool lse_flag,
-    bool is_tnd)                                // true: TND (varlen), false: BSND
+    FwdLayout layout)                            // TND (varlen), BSND (B,S,H,D) or BNSD (B,H,S,D)
 {
     if (is_varlen_q) {
         TORCH_CHECK(cu_seqlens_q_cpu_int32 != nullptr,
@@ -124,18 +126,18 @@ inline void fill_inference_context(
         if (seqused_q_cpu_int32 != nullptr) {
             // Tiling follows the *used* lengths; offsets stay on the cu region.
             auto q_per_batch = copy_int32_vec(*seqused_q_cpu_int32, batch_size);
-            if (is_tnd) {
+            if (layout == FwdLayout::TND) {
                 scratch.q = cumulate_int32(q_per_batch);
             } else {
                 scratch.q = std::move(q_per_batch);
             }
-        } else if (is_tnd) {
+        } else if (layout == FwdLayout::TND) {
             scratch.q = copy_cu_seqlens_int32(*cu_seqlens_q_cpu_int32, batch_size);
         } else {
             scratch.q = decumulate_int32(*cu_seqlens_q_cpu_int32, batch_size);
         }
     } else {
-        if (is_tnd) {
+        if (layout == FwdLayout::TND) {
             scratch.q.resize(batch_size + 1);
             scratch.q[0] = 0;
             for (int i = 0; i < batch_size; ++i) {
@@ -147,9 +149,16 @@ inline void fill_inference_context(
     }
     TORCH_CHECK(seqused_k_cpu_int32 != nullptr,
                 "fill_inference_context: per-batch KV seqlen (seqused_k / cache_seqlens) is required");
+    if (layout == FwdLayout::BNSD) {
+        // BNSD KV always uses a per-batch length list; a cumulative (batch+1)
+        // cu-packed list has no meaning for this layout.
+        TORCH_CHECK(seqused_k_cpu_int32->numel() == batch_size,
+                    "fill_inference_context: BNSD KV requires per-batch KV lengths (size = batch), "
+                    "not a cumulative batch+1 list");
+    }
     auto kv_per_batch = copy_int32_vec(*seqused_k_cpu_int32, batch_size);
 
-    if (is_tnd && !paged_KV) {
+    if (layout == FwdLayout::TND && !paged_KV) {
         scratch.kv = cumulate_int32(kv_per_batch);
     } else {
         scratch.kv = std::move(kv_per_batch);
@@ -165,7 +174,7 @@ inline void fill_inference_context(
     ctx.maxNumBlocksPerBatch = paged_KV ? max_num_blocks_per_seq : 0;
 
     int64_t maxQ = 0, maxKV = 0;
-    if (is_tnd) {
+    if (layout == FwdLayout::TND) {
         for (int i = 0; i < batch_size; ++i) {
             int64_t qLen = scratch.q[i + 1] - scratch.q[i];
             if (qLen > maxQ) maxQ = qLen;
@@ -175,7 +184,7 @@ inline void fill_inference_context(
             if (scratch.q[i] > maxQ) maxQ = scratch.q[i];
         }
     }
-    if (is_tnd && !paged_KV) {
+    if (layout == FwdLayout::TND && !paged_KV) {
         for (int i = 0; i < batch_size; ++i) {
             int64_t kvLen = scratch.kv[i + 1] - scratch.kv[i];
             if (kvLen > maxKV) maxKV = kvLen;
@@ -213,7 +222,7 @@ inline void fill_inference_context(
                                   : optiling::DataType::FP16;
     ctx.pagedCacheFlag = paged_KV;
     ctx.lseFlag = lse_flag;
-    ctx.isTnd = is_tnd;         // TND (varlen) or BSND layout
+    ctx.layout = layout;  // TND (varlen), BSND (B,S,H,D) or BNSD (B,H,S,D)
 
     ctx.innerPrecise = 0;   // fixed FP32 accumulation
     ctx.isTilingSink = false;

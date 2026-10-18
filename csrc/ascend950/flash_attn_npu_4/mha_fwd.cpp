@@ -53,7 +53,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                 std::optional<float> softmax_scale_, bool is_causal, int64_t window_size_left,
                                 int64_t window_size_right, float softcap, int64_t num_splits,
                                 std::optional<bool> pack_gqa_, std::optional<at::Tensor> learnable_sink_,
-                                bool return_lse, std::optional<at::Tensor> scheduler_metadata_)
+                                bool return_lse, std::optional<at::Tensor> scheduler_metadata_,
+                                int64_t layout)
 {
     // ============================================================
     // 0. Device guard + stream + AIC core count
@@ -172,10 +173,40 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
         num_heads = static_cast<int>(sizes[2]);
         head_size_q = static_cast<int>(sizes[3]);
     }
+
+    // 5b. Layout (FwdLayout, resolved by the Python caller; Q/K/V share one layout)
+    TORCH_CHECK(layout >= static_cast<int64_t>(FwdLayout::TND) &&
+                    layout <= static_cast<int64_t>(FwdLayout::BNSD),
+                "950 backend (v4) received an unsupported layout code (", layout, ")");
+    const FwdLayout layout_enum = static_cast<FwdLayout>(layout);
+    TORCH_CHECK((layout_enum == FwdLayout::TND) == is_varlen_q,
+                "950 backend (v4) layout code conflicts with cu_seqlens_q: TND requires it, "
+                "BSND and BNSD forbid it");
+    if (layout_enum == FwdLayout::BNSD) {
+        // BNSD stores heads on dim1 and the sequence on dim2, i.e. the transpose
+        // of the BSND reading assigned above.
+        num_heads = static_cast<int>(sizes[1]);
+        seqlen_q = static_cast<int>(sizes[2]);
+    }
+
+    int64_t kv_seqlen_allocated = 0;
+    if (layout_enum == FwdLayout::BNSD) {
+        // BNSD requires Q, K and V to share the same rank-4 (B, H, S, D) layout.
+        TORCH_CHECK(!paged_KV && !is_varlen_kv && k.dim() == 4 && v.dim() == 4,
+                    "950 backend (v4) BNSD layout requires rank-4, non-paged key/value tensors with "
+                    "the same (B, H, S, D) layout as the query");
+        kv_seqlen_allocated = static_cast<int64_t>(k.size(2));
+        TORCH_CHECK(k.size(0) == v.size(0) && k.size(1) == v.size(1) && k.size(2) == v.size(2),
+                    "950 backend (v4) BNSD key and value must share batch, head and sequence dimensions "
+                    "(the head dimension may differ)");
+    }
+
     const int max_num_blocks_per_seq = !paged_KV ? 0 : static_cast<int>(page_table.size(1));
     const int num_blocks = !paged_KV ? 0 : static_cast<int>(k.size(0));
     const int page_block_size = !paged_KV ? 128 : static_cast<int>(k.size(1));
-    const int num_heads_k = k.dim() == 3 ? static_cast<int>(k.size(1)) : static_cast<int>(k.size(2));
+    const int num_heads_k = layout_enum == FwdLayout::BNSD
+                                ? static_cast<int>(k.size(1))
+                                : (k.dim() == 3 ? static_cast<int>(k.size(1)) : static_cast<int>(k.size(2)));
     const int head_size_v = static_cast<int>(v.size(-1));
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
@@ -222,9 +253,13 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     static_assert(std::is_trivially_copyable<FAInferTilingData>::value,
                   "CPU tiling aggregate must remain trivially copyable");
     if (scheduler_metadata_.has_value()) {
+        // BNSD stores the sequence on dim2 (heads live on dim1), so the KV bound
+        // must not be read from dim1 in that case.
         const int64_t kv_seqlen_bound =
             max_seqlen_k_.value_or(paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
-                                            : (k.dim() == 4 ? k.size(1) : k.size(0)));
+                                            : (layout_enum == FwdLayout::BNSD
+                                                   ? k.size(2)
+                                                   : (k.dim() == 4 ? k.size(1) : k.size(0))));
         if (kv_seqlen_bound > 0 && window_size_left >= kv_seqlen_bound) {
             window_size_left = -1;
         }
@@ -292,7 +327,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                is_local ? window_size_left : 0, is_local ? window_size_right : 0, is_varlen_q, is_bf16,
                                batch_size, seqlen_q, num_heads, num_heads_k, head_size_q, head_size_v,
                                softmax_scale_.value_or(1.0f / std::sqrt(static_cast<float>(head_size_q))), softcap,
-                               return_lse, is_varlen_q);
+                               return_lse, layout_enum);
         ctx.flashDecodeFlag = num_splits != 1 && fd_shape_supported;
         ctx.numSplits = static_cast<uint32_t>(num_splits);
         optiling::FAInferTiling tiler(ctx);
@@ -424,7 +459,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     // ============================================================
     // 10. Launch via launch_fwd
     // ============================================================
-    const Format fmt = is_varlen_q ? Format::TND : Format::BSND;
+    const Format fmt = static_cast<Format>(layout_enum);
     const MaskCategory mask_category =
         is_local ? MaskCategory::MASK_SWA : (is_causal ? MaskCategory::MASK_CAUSAL : MaskCategory::NO_MASK);
 
@@ -476,8 +511,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
         maskDev = static_cast<uint8_t*>(mask_npu_tensor.data_ptr());
     }
 
-    const bool enableDN =
-        !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) && (head_size_v <= 256);
+    const bool enableDN = !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) &&
+                          (head_size_v <= 256);
     const uint32_t launchBlockDim = scheduler_metadata_.has_value()
                                         ? (flashDecodeEnabled ? metadataFdCoreCapacity : blockDim)
                                         : (flashDecodeEnabled ? tilingData.fdActiveCoreNum : blockDim);
@@ -506,7 +541,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                 seqUsedKvDev,
                                 wsDev,
                                 tilDev,
-                                runtimeDev};
+                                runtimeDev,
+                                kv_seqlen_allocated};
     auto launch_fa_infer = [fwdArgs]() -> int {
         launch_fwd(fwdArgs);
         return 0;

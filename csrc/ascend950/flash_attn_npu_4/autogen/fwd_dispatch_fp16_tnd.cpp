@@ -9,5 +9,5 @@
 
 #include "../fwd_dispatch_impl.hpp"
 
-template void launch_fwd_impl<half, true>(
+template void launch_fwd_impl<half, Format::TND>(
     const FwdLaunchArgs &a);

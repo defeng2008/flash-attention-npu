@@ -187,10 +187,13 @@ public:
     __aicore__ inline
     ~BlockMmadTla() {}
 
+    // qHeadStride is the source-tensor distance (in elements) between adjacent
+    // Q heads: embed for BSND, maxQSeqlen * embed for BNSD.  It is the
+    // srcNdMatrixStride of the Nd2Nz copy (one ND matrix per Q head).
     template <class TensorA>
     __aicore__ inline
     void loadQGM(TensorA &gATensor, GemmCoord actualOriShape,
-                 uint32_t qSBlockSize, uint32_t qNBlockSize)
+                 uint32_t qSBlockSize, uint32_t qNBlockSize, int64_t qHeadStride)
     {
         using CopyGmToL1B = typename TileCopy_::template CopyGmToL1B<TensorA>;
         CopyGmToL1B copyGmToL1B;
@@ -206,7 +209,7 @@ public:
         auto gmQTile = GetTile(gATensor,
             tla::MakeCoord(0, 0), tla::MakeShape(embed, qSBlockSize));
         copyGmToL1B(l1QTile, gmQTile,
-            qNBlockSize, embed, qSBlockSize * C0_ELEMS);
+            qNBlockSize, static_cast<uint32_t>(qHeadStride), qSBlockSize * C0_ELEMS);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
     }

@@ -12,7 +12,7 @@
 
 struct FwdLaunchArgs {
     bool is_bf16;
-    Format layout; // BSND or TND
+    Format layout; // TND, BSND or BNSD
     MaskCategory mask_category;
     bool paged_kv;
     bool enable_dn;    // use the FAInferDn fast path
@@ -39,32 +39,35 @@ struct FwdLaunchArgs {
     float softcap_value;
     uint32_t num_blocks;
     uint32_t max_num_blocks_per_batch;
+    int64_t kv_seqlen_allocated; // allocated KV sequence length (BNSD head plane)
 };
 
 // Per-(dtype, layout) implementation, defined in fwd_dispatch_impl.hpp and
-// explicitly instantiated per (dtype, IS_TND) in
-// autogen/fwd_dispatch_<dtype>_<layout>.cpp. IS_TND is true for TND (varlen)
-// layout, false for BSND.
-template <typename DType, bool IS_TND>
+// explicitly instantiated per (dtype, Format) in
+// autogen/fwd_dispatch_<dtype>_<layout>.cpp.
+template <typename DType, Format kLayout>
 void launch_fwd_impl(const FwdLaunchArgs& a);
 
-// Runtime entry: IS_TND is picked from a.layout at runtime, then the matching
+// Runtime entry: kLayout is picked from a.layout at runtime, then the matching
 // dtype's launcher is selected. launch_fwd_impl is explicitly instantiated
-// per (dtype, IS_TND) in the autogen TUs.
+// per (dtype, Format) in the autogen TUs.
 inline void launch_fwd(const FwdLaunchArgs& a)
 {
-    const bool is_bsnd = (a.layout == Format::BSND);
     if (a.is_bf16) {
-        if (is_bsnd) {
-            launch_fwd_impl<bfloat16_t, false>(a);
+        if (a.layout == Format::TND) {
+            launch_fwd_impl<bfloat16_t, Format::TND>(a);
+        } else if (a.layout == Format::BNSD) {
+            launch_fwd_impl<bfloat16_t, Format::BNSD>(a);
         } else {
-            launch_fwd_impl<bfloat16_t, true>(a);
+            launch_fwd_impl<bfloat16_t, Format::BSND>(a);
         }
     } else {
-        if (is_bsnd) {
-            launch_fwd_impl<half, false>(a);
+        if (a.layout == Format::TND) {
+            launch_fwd_impl<half, Format::TND>(a);
+        } else if (a.layout == Format::BNSD) {
+            launch_fwd_impl<half, Format::BNSD>(a);
         } else {
-            launch_fwd_impl<half, true>(a);
+            launch_fwd_impl<half, Format::BSND>(a);
         }
     }
 }
