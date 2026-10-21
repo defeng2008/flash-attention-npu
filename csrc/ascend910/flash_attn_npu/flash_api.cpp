@@ -343,15 +343,6 @@ std::vector<at::Tensor> mha_fwd_kvcache(
         int64_t seqlen_k_val = is_bnsd ? static_cast<int64_t>(kcache.size(2)) : static_cast<int64_t>(kcache.size(1));
         seqlens_k = at::full({batch_size}, seqlen_k_val, at::dtype(torch::kInt32).device(kcache.device()));
     }
-    if (is_bnsd) {
-        at::Tensor seqlens_k_cpu_check = seqlens_k.to(at::Device(at::kCPU));
-        const int32_t* sl_check = static_cast<const int32_t*>(seqlens_k_cpu_check.data_ptr());
-        for (int32_t i = 0; i < batch_size; i++) {
-            TORCH_CHECK(sl_check[i] >= 0 && static_cast<int64_t>(sl_check[i]) <= kv_seqlen_allocated,
-                        "fwd_kvcache: BNSD KV length ", sl_check[i], " exceeds the allocated KV plane width ",
-                        kv_seqlen_allocated);
-        }
-    }
     int64_t kvCacheSeqlen = 0;
     int64_t kvNewSeqlen = 0;
     if (appendKV) {

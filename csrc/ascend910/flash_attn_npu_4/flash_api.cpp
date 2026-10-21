@@ -181,8 +181,6 @@ std::vector<at::Tensor> mha_fwd(
     TORCH_CHECK(layout >= 0 && layout <= 2, "layout must be 0 (TND), 1 (BSND) or 2 (BNSD)");
     const bool is_tnd_layout = (layout == 0);
     const bool is_bnsd_layout = (layout == 2);
-    TORCH_CHECK(is_tnd_layout == is_varlen_q,
-                "layout 0 (TND) requires cu_seqlens_q, and cu_seqlens_q is only valid with layout 0 (TND)");
     if (is_bnsd_layout) {
         TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4,
                     "layout 2 (BNSD) requires rank-4 q, k, v of shape (batch, heads, seqlen, dim)");

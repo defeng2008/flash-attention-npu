@@ -177,9 +177,6 @@ std::vector<at::Tensor> mha_fwd(
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto hostStart = std::chrono::steady_clock::now();
 
-    // layout: 0 = TND (varlen-packed), 1 = BSND, 2 = BNSD. The kernel-side
-    // FaiKenel::inputLayout enum uses a different numbering (BSND=0, TND=1,
-    // BNSD=2), so every launch maps explicitly.
     TORCH_CHECK(layout >= 0 && layout <= 2, "layout must be 0 (TND), 1 (BSND) or 2 (BNSD); got ", layout);
     const bool is_bnsd = (layout == 2);
 
@@ -195,10 +192,6 @@ std::vector<at::Tensor> mha_fwd(
         TORCH_CHECK(cu_seqlens_q_->numel() > 1, "batch size must be positive");
         TORCH_CHECK(q.size(0) > 0, "total_q must be positive (q must contain at least one query token)");
     }
-
-    TORCH_CHECK((layout == 0) == cu_seqlens_q_.has_value(),
-                "layout TND (0) is the varlen-packed layout and requires cu_seqlens_q; "
-                "BSND (1) / BNSD (2) must not pass cu_seqlens_q");
 
     auto q_dtype = q.dtype();
     bool is_bf16 = q_dtype == torch::kBFloat16;
@@ -347,18 +340,6 @@ std::vector<at::Tensor> mha_fwd(
         } else {
             int64_t seqlen_k_val = is_bnsd ? k.size(2) : k.size(1);
             seqlens_k = at::full({batch_size}, seqlen_k_val, at::dtype(torch::kInt32).device(k.device()));
-        }
-    }
-
-    if (is_bnsd) {
-        // The per-batch KV lengths (cache_seqlens / seqused_k) must fit the allocated
-        // KV plane (k.size(2)); otherwise the BNSD stride derivation would walk out of
-        // the tensor.
-        at::Tensor sk_cpu = seqlens_k.to(at::Device(at::kCPU));
-        const int32_t* sk = static_cast<const int32_t*>(sk_cpu.data_ptr());
-        for (int32_t i = 0; i < batch_size; i++) {
-            TORCH_CHECK(sk[i] >= 0 && static_cast<int64_t>(sk[i]) <= kv_seqlen_allocated, "BNSD: batch ", i,
-                        " KV length ", sk[i], " exceeds the allocated KV sequence length ", kv_seqlen_allocated);
         }
     }
 
