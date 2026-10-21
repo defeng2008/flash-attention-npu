@@ -43,9 +43,9 @@ BNSD（`(B, H, S, D)`，per-head plane）形式存放，调用方需要 `q.trans
 
 - 950 侧接口文件为 `flash_attn_npu_3/flash_attn_npu_interface_950.py`、`flash_attn_npu_4/flash_attn_npu_interface_950.py`；
   910 侧三后端均为 `flash_attn_npu{,_3,_4}/flash_attn_npu_interface.py`。
-- 950 侧测试为 `tests/test_flash_attn_npu_v3_bnsd.py` / `tests/test_flash_attn_npu_v4_bnsd.py`；
-  910 侧测试带 `_910` 后缀以与 950 同名文件区分：`tests/test_flash_attn_npu_v2_bnsd_910.py` /
-  `tests/test_flash_attn_npu_v3_bnsd_910.py` / `tests/test_flash_attn_npu_v4_bnsd_910.py`。
+- 950 侧测试为 `docs/tests/test_flash_attn_npu_v3_bnsd.py` / `docs/tests/test_flash_attn_npu_v4_bnsd.py`；
+  910 侧测试带 `_910` 后缀以与 950 同名文件区分：`docs/tests/test_flash_attn_npu_v2_bnsd_910.py` /
+  `docs/tests/test_flash_attn_npu_v3_bnsd_910.py` / `docs/tests/test_flash_attn_npu_v4_bnsd_910.py`。
 - 910 v2 的 `mha_varlen_fwd`（rank-3 / TND）不参与 BNSD；v2 的 packed 变体同样只按 BSND / TND 解读。
 
 ## What Changes
@@ -135,7 +135,7 @@ BNSD（`(B, H, S, D)`，per-head plane）形式存放，调用方需要 `q.trans
 | dispatch 模板参数 | `<DType, Format kLayout>` | 由 `bool IS_TND` 改为 `<DType, inputLayout kLayout>` |
 | fwd TU 变化 | v3 / v4 均 4 → 6（bwd 不变） | v3 fwd 4 → 6（bwd 4 不变）、v4 fwd 4 → 6；v2 `fwd_dispatch` 4 → 6、`fwd_combo` 32 → 48，`fag_general_dispatch` / `varlen_bwd_dispatch` 仍 2 项 |
 | 接口文件 | `flash_attn_npu_interface_950.py`（v3 / v4） | `flash_attn_npu_interface.py`（v2 / v3 / v4） |
-| 测试文件 | `tests/test_flash_attn_npu_v3_bnsd.py` / `_v4_bnsd.py` | `tests/test_flash_attn_npu_v2_bnsd_910.py` / `_v3_bnsd_910.py` / `_v4_bnsd_910.py` |
+| 测试文件 | `docs/tests/test_flash_attn_npu_v3_bnsd.py` / `_v4_bnsd.py` | `docs/tests/test_flash_attn_npu_v2_bnsd_910.py` / `_v3_bnsd_910.py` / `_v4_bnsd_910.py` |
 | 平台专项 | DN 快路径专项（`qHeadStride` 修复） | append-KV / `q_v` 拒绝；v2 FAG 常量与 `mha_varlen_fwd` 不改 |
 
 ## Impact
@@ -159,8 +159,8 @@ BNSD（`(B, H, S, D)`，per-head plane）形式存放，调用方需要 `q.trans
     （v4 无 `k_new/v_new`、无 `rotary`，有 `blockTableStride` / `gather_kv_indices`）、
     `flash_attn_npu_4/flash_attn_npu_interface.py`
   - **测试**：950 `tests/test_flash_attn_npu_v3.py`、`tests/test_flash_attn_npu_v4.py`、
-    `docs/enable-qkv-bnsd/test_kv_seqlen_allocated.py`；910 `tests/test_flash_attn_npu_v2_bnsd_910.py`、
-    `tests/test_flash_attn_npu_v3_bnsd_910.py`、`tests/test_flash_attn_npu_v4_bnsd_910.py`
+    `docs/enable-qkv-bnsd/test_kv_seqlen_allocated.py`；910 `docs/tests/test_flash_attn_npu_v2_bnsd_910.py`、
+    `docs/tests/test_flash_attn_npu_v3_bnsd_910.py`、`docs/tests/test_flash_attn_npu_v4_bnsd_910.py`
 
 - 明确不改：对外 Python 公开签名、`fa_metadata.aicpu`、`FAInferTilingData`（v3/v4）与
   `FAInferStaticTilingData` / `FAInferRuntimeData`（910 v4）字段集合、950 与 910 两侧的其它后端行为

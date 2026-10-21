@@ -95,8 +95,8 @@
 - [x] 公开 API 拒绝 `bnsd=`；BNSD backward 按预期报错
 - [x] v3 BSND 回归套件 `tests/test_flash_attn_npu_v3.py` 结果确认：345 passed / 99 skipped / 0 failed
 - [x] v4 BSND 回归套件 `tests/test_flash_attn_npu_v4.py` 结果确认：320 passed / 4 skipped / 0 failed
-- [x] BNSD 用例已落进仓库测试目录：`tests/test_flash_attn_npu_v3_bnsd.py`（8 passed）与
-      `tests/test_flash_attn_npu_v4_bnsd.py`（6 passed），覆盖 stride 零拷贝路径、连续 rank-4 回退 BSND、
+- [x] BNSD 用例已落进仓库测试目录：`docs/tests/test_flash_attn_npu_v3_bnsd.py`（8 passed）与
+      `docs/tests/test_flash_attn_npu_v4_bnsd.py`（6 passed），覆盖 stride 零拷贝路径、连续 rank-4 回退 BSND、
       causal、LSE 布局、GQA 多头组、forward-only 拒绝、BNSD kvcache 分配平面长度
 - [x] BNSD 支持 `scheduler_metadata` 后：实测 BNSD 调用 `get_scheduler_metadata` 恰好 1 次且尺寸取 BSND 语义；
       v3/v4 metadata 套件（15 passed / 80 skipped、45 passed / 6 skipped）与主回归（345/99、320/4）全绿
@@ -161,11 +161,11 @@
 
 ### 功能验证
 
-- [x] v3 `tests/test_flash_attn_npu_v3_bnsd_910.py`（910 门槛）通过：stride 零拷贝路径、与等价 BSND 逐元素相等、连续 rank-4 回退 BSND、causal、LSE 形状与数值、forward-only 拒绝、`S_alloc > cache_seqlens`、GQA `H_KV >= 2`
-- [x] v4 `tests/test_flash_attn_npu_v4_bnsd_910.py`（910 门槛）通过
-- [x] v2 `tests/test_flash_attn_npu_v2_bnsd_910.py`（910 门槛）通过，且 packed / varlen 入口未被解释为 BNSD
+- [x] v3 `docs/tests/test_flash_attn_npu_v3_bnsd_910.py`（910 门槛）通过：stride 零拷贝路径、与等价 BSND 逐元素相等、连续 rank-4 回退 BSND、causal、LSE 形状与数值、forward-only 拒绝、`S_alloc > cache_seqlens`、GQA `H_KV >= 2`
+- [x] v4 `docs/tests/test_flash_attn_npu_v4_bnsd_910.py`（910 门槛）通过
+- [x] v2 `docs/tests/test_flash_attn_npu_v2_bnsd_910.py`（910 门槛）通过，且 packed / varlen 入口未被解释为 BNSD
 - [x] BNSD 路径的 `out` 形状等于调用方传入的 `q` 形状；LSE 形状符合各入口既有约定
-- [x] 与 950 既有 BNSD 用例（`tests/test_flash_attn_npu_v{3,4}_bnsd.py` 中 950 门槛部分）互不干扰，950 上不误跑 910 用例
+- [x] 与 950 既有 BNSD 用例（`docs/tests/test_flash_attn_npu_v{3,4}_bnsd.py` 中 950 门槛部分）互不干扰，950 上不误跑 910 用例
 
 ### 回归与静态核对
 

@@ -647,8 +647,8 @@ FlashDecode 候选本身要求 `paged_KV`，而 BNSD 要求非 paged，两者天
 
 | 文件 | 用例 |
 |---|---|
-| `tests/test_flash_attn_npu_v3_bnsd.py` | `test_bnsd_dn_grouped_heads_with_lse`（L221）、`test_bnsd_dn_head_size_192`（L245）、`test_bnsd_dn_wide_group_two_kv_heads`（L260） |
-| `tests/test_flash_attn_npu_v4_bnsd.py` | `test_v4_bnsd_dn_grouped_heads_with_lse`（L160）、`test_v4_bnsd_dn_head_size_256`（L179）、`test_v4_bnsd_dn_unaligned_q_seqlen`（L194） |
+| `docs/tests/test_flash_attn_npu_v3_bnsd.py` | `test_bnsd_dn_grouped_heads_with_lse`（L221）、`test_bnsd_dn_head_size_192`（L245）、`test_bnsd_dn_wide_group_two_kv_heads`（L260） |
+| `docs/tests/test_flash_attn_npu_v4_bnsd.py` | `test_v4_bnsd_dn_grouped_heads_with_lse`（L160）、`test_v4_bnsd_dn_head_size_256`（L179）、`test_v4_bnsd_dn_unaligned_q_seqlen`（L194） |
 
 回归：BSND / TND 的 DN 路径取值与改动前逐项相同，非 BNSD 全量套件 **823 passed / 200 skipped /
 20 deselected，0 failed**，零回归。
@@ -746,7 +746,7 @@ FlashDecode 候选本身要求 `paged_KV`，而 BNSD 要求非 paged，两者天
 
 #### 5.2.5 验证结果
 
-- `tests/test_flash_attn_npu_v3_bnsd_910.py`：**11 passed**（stride 零拷贝、与等价 BSND 逐元素相等、
+- `docs/tests/test_flash_attn_npu_v3_bnsd_910.py`：**11 passed**（stride 零拷贝、与等价 BSND 逐元素相等、
   连续 rank-4 回退 BSND、causal、LSE 形状 `(B,H,S)` 与数值、forward-only 拒绝、GQA `H_KV >= 2`、
   `S_alloc > cache_seqlens` 的分配平面长度）。
 - `tests/test_flash_attn_npu_v3.py` + `tests/test_flash_attn_npu_v3_metadata.py` 全量：
@@ -817,7 +817,7 @@ v4 **无** `flash_attn_with_kvcache` 入口，也**无** `k_new/v_new` / rotary�
 
 #### 5.3.5 验证结果
 
-- `tests/test_flash_attn_npu_v4_bnsd_910.py`：**10 passed**。
+- `docs/tests/test_flash_attn_npu_v4_bnsd_910.py`：**10 passed**。
 - `tests/test_flash_attn_npu_v4.py` 全量：**370 passed / 0 failed**。
 
 ### 5.4 v2 后端（`csrc/ascend910/flash_attn_npu/`）
@@ -839,7 +839,7 @@ v2 有独有的 `fwd_kvcache` 与 varlen / packed 入口，是本代差异最多
 | L1005–1009 | backward 拒绝 BNSD（错误信息「910 后端 BNSD 仅支持前向，反向未实现」） |
 | L1782–1852 | `flash_attn_with_kvcache`：L1808 `bsnd_seqlen_k = k_cache.shape[1]`；L1809–1811 探测；L1812–1824 BNSD 下拒绝 `k/v` 并校验 `max(cache_seqlens)`；L1847 `layout=layout`；L1849–1851 转置 |
 
-packed（rank-5）与 varlen（rank-3）入口**不参与 BNSD**（`tests/test_flash_attn_npu_v2_bnsd_910.py::test_v2_packed_varlen_not_bnsd` 专门核对）。
+packed（rank-5）与 varlen（rank-3）入口**不参与 BNSD**（`docs/tests/test_flash_attn_npu_v2_bnsd_910.py::test_v2_packed_varlen_not_bnsd` 专门核对）。
 
 #### 5.4.2 Host 侧
 
@@ -893,7 +893,7 @@ packed（rank-5）与 varlen（rank-3）入口**不参与 BNSD**（`tests/test_f
 
 #### 5.4.5 验证结果
 
-- `tests/test_flash_attn_npu_v2_bnsd_910.py`：**12 passed**（含 packed / varlen 入口不按 BNSD 解读的核对）。
+- `docs/tests/test_flash_attn_npu_v2_bnsd_910.py`：**12 passed**（含 packed / varlen 入口不按 BNSD 解读的核对）。
 - `tests/test_flash_attn_npu_v2.py` 全量：**376 passed / 0 failed**。
 - 回归定位最小复现：`tests/test_flash_attn_npu_v2.py -k "59 or 111"` **38 passed**（见 §5.5.1）。
 
@@ -985,7 +985,7 @@ layout 与 `cu_seqlens_q` 矛盾的调用仍被拒绝；不改测试文件，不
 | backward 拒绝 | v3 `FlashAttnFunc` / `FlashAttnVarlenFunc`、v4 `FlashAttnFunc` 抛 `NotImplementedError` | v2/v3/v4 的 autograd `backward` 首行抛 `NotImplementedError`；v2 另在 host `mha_bwd` 用 `IsBnsdTransposedView` 拒绝 |
 | Python 接口文件命名 | `flash_attn_npu_3/flash_attn_npu_interface_950.py`、`flash_attn_npu_4/flash_attn_npu_interface_950.py` | `flash_attn_npu{,_3,_4}/flash_attn_npu_interface.py`（无 `_950` 后缀） |
 | Python 探测实现 | 同一套 `_LAYOUT_*` / `_transposed_bnsd_view` / `_detect_layout` | 同一套（三份各自独立实现）；v2 另有 `layout=q.layout`（tensor layout）既有用法兼容 |
-| 测试文件命名 | `tests/test_flash_attn_npu_v{3,4}_bnsd.py`（950 门槛） | `tests/test_flash_attn_npu_v{2,3,4}_bnsd_910.py`（910 门槛，设备名含 `Ascend910`） |
+| 测试文件命名 | `docs/tests/test_flash_attn_npu_v{3,4}_bnsd.py`（950 门槛） | `docs/tests/test_flash_attn_npu_v{2,3,4}_bnsd_910.py`（910 门槛，设备名含 `Ascend910`） |
 | 编译 / 验证环境 | conda `ascend` + `~/miniconda3/Ascend/cann/set_env.sh`（CANN 9.1.0），`FLASH_ATTN_BUILD_NPU=950` | `source /data/.sysvol/cann/cann-9.3.0/set_env.sh` + conda `zzy311new`（torch 2.7.1 / torch_npu 2.7.1.post5 / Ascend910B3），`FLASH_ATTN_BUILD_NPU=910 FLASH_ATTN_BUILD_VERSION=all python setup.py install` |
 | BNSD 用例数 | v3 10 passed、v4 9 passed（含 DN 专项） | v2 12 passed、v3 11 passed、v4 10 passed |
 | 全量回归（非 BNSD） | 823 passed / 200 skipped / 20 deselected / 0 failed | v2 376 passed / 0 failed；v3（+metadata）528 passed / 11 skipped / 0 failed；v4 370 passed / 0 failed |
@@ -1072,8 +1072,8 @@ q 是 BNSD 转置视图而 v 是普通 BSND → 三者未全部命中，stride �
 
 | 项 | 结果 |
 |---|---|
-| `tests/test_flash_attn_npu_v3_bnsd.py` | **8 passed** —— stride 零拷贝、连续 rank-4 回退 BSND、causal、LSE 布局、forward-only 拒绝、BNSD kvcache 分配平面长度 |
-| `tests/test_flash_attn_npu_v4_bnsd.py` | **6 passed** —— stride 零拷贝、causal、16/4 GQA 多头组、LSE 布局、forward-only 拒绝 |
+| `docs/tests/test_flash_attn_npu_v3_bnsd.py` | **8 passed** —— stride 零拷贝、连续 rank-4 回退 BSND、causal、LSE 布局、forward-only 拒绝、BNSD kvcache 分配平面长度 |
+| `docs/tests/test_flash_attn_npu_v4_bnsd.py` | **6 passed** —— stride 零拷贝、causal、16/4 GQA 多头组、LSE 布局、forward-only 拒绝 |
 | `tests/test_flash_attn_npu_v3_metadata.py` | 15 passed / 80 skipped / **0 failed** |
 | `tests/test_flash_attn_npu_v4_metadata.py` | 45 passed / 6 skipped / **0 failed** |
 | `tests/test_flash_attn_npu_v3.py` | 345 passed / 99 skipped / **0 failed** |
@@ -1096,8 +1096,8 @@ q 是 BNSD 转置视图而 v 是普通 BSND → 三者未全部命中，stride �
 |---|---|
 | 全量重编（`FLASH_ATTN_BUILD_NPU=950`） | **成功**，0 error；host `flash_api.cpp`（含 `mha_fwd.cpp`）重编，两个 `.so` 重新链接并就位拷出 |
 | metadata 路由探针（`/tmp/probe_metadata_bnsd.py`，monkeypatch 计数） | v3/v4 对 BNSD 均调用 `get_scheduler_metadata` **恰好 1 次**，尺寸取 BSND 语义（`max_seqlen_q`=64=S、`max_seqlen_k`=128=S_k、heads=8=H），证明 BNSD 已改走 metadata 路径 |
-| `tests/test_flash_attn_npu_v3_bnsd.py` | **8 passed**（含 `flash_attn_with_kvcache` BNSD 分配平面用例，现已走 metadata） |
-| `tests/test_flash_attn_npu_v4_bnsd.py` | **6 passed** |
+| `docs/tests/test_flash_attn_npu_v3_bnsd.py` | **8 passed**（含 `flash_attn_with_kvcache` BNSD 分配平面用例，现已走 metadata） |
+| `docs/tests/test_flash_attn_npu_v4_bnsd.py` | **6 passed** |
 | `tests/test_flash_attn_npu_v3_metadata.py` | **15 passed / 80 skipped / 0 failed** |
 | `tests/test_flash_attn_npu_v4_metadata.py` | **45 passed / 6 skipped / 0 failed** |
 | `tests/test_flash_attn_npu_v3.py` | **345 passed / 99 skipped / 0 failed**（与基线一致，757s） |
@@ -1110,8 +1110,8 @@ q 是 BNSD 转置视图而 v 是普通 BSND → 三者未全部命中，stride �
 | 全量重编（`FLASH_ATTN_BUILD_NPU=950`） | **成功**，0 error；TU 仍为 **6**（新增的 `FAInferDn<BNSD>` 在既有 TU 内实例化） |
 | 第一步差分（只放开两处门禁） | BNSD 非 causal 用例**全部失败**，`max\|actual - ref\|` 9.875 ~ 16.89 —— 证明 DN 确实被选中、修复确有必要 |
 | 第二步差分（加 `qHeadStride` 并重编） | 上述用例**全部通过** |
-| `tests/test_flash_attn_npu_v3_bnsd.py` | **10 passed**（含 3 个 DN 专项） |
-| `tests/test_flash_attn_npu_v4_bnsd.py` | **9 passed**（含 3 个 DN 专项） |
+| `docs/tests/test_flash_attn_npu_v3_bnsd.py` | **10 passed**（含 3 个 DN 专项） |
+| `docs/tests/test_flash_attn_npu_v4_bnsd.py` | **9 passed**（含 3 个 DN 专项） |
 | 两套 BNSD 用例合计 | **19 passed in 166s**（单次运行） |
 | 非 BNSD 全量 | **823 passed / 200 skipped / 20 deselected / 0 failed** —— BSND/TND 下 `qHeadStride == embed_`，DN 取值与改动前逐项等价，零回归 |
 
@@ -1121,9 +1121,9 @@ q 是 BNSD 转置视图而 v 是普通 BSND → 三者未全部命中，stride �
 |---|---|
 | 全量编译（`source /data/.sysvol/cann/cann-9.3.0/set_env.sh` + `FLASH_ATTN_BUILD_NPU=910 FLASH_ATTN_BUILD_VERSION=all python setup.py install`） | **成功 0 error**；三个 `.so`（`flash_attn_npu` / `flash_attn_npu_3` / `flash_attn_npu_4`）就地就位 |
 | TU 数核对 | v3 **fwd 6 + bwd 4**、v4 **fwd 6**、v2 **fwd_dispatch 6 + fwd_combo 48**；fag / varlen_bwd 不变 |
-| `tests/test_flash_attn_npu_v2_bnsd_910.py` | **12 passed** |
-| `tests/test_flash_attn_npu_v3_bnsd_910.py` | **11 passed** |
-| `tests/test_flash_attn_npu_v4_bnsd_910.py` | **10 passed** |
+| `docs/tests/test_flash_attn_npu_v2_bnsd_910.py` | **12 passed** |
+| `docs/tests/test_flash_attn_npu_v3_bnsd_910.py` | **11 passed** |
+| `docs/tests/test_flash_attn_npu_v4_bnsd_910.py` | **10 passed** |
 | `tests/test_flash_attn_npu_v2.py` 全量 | **376 passed / 0 failed** |
 | `tests/test_flash_attn_npu_v3.py` + `tests/test_flash_attn_npu_v3_metadata.py` 全量 | **528 passed / 11 skipped / 0 failed** |
 | `tests/test_flash_attn_npu_v4.py` 全量 | **370 passed / 0 failed** |

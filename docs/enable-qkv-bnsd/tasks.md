@@ -208,17 +208,17 @@
         `test_flash_attn_npu_v2_metadata.py`，确认 BSND/TND 零回归
 
 - [x] Task 5: 新增 910 BNSD 用例
-  - [x] SubTask 5.1: 新增 `tests/test_flash_attn_npu_v3_bnsd.py`（910 门槛：设备名含 `Ascend910`；
+  - [x] SubTask 5.1: 新增 `docs/tests/test_flash_attn_npu_v3_bnsd.py`（910 门槛：设备名含 `Ascend910`；
         与既有 950 同名文件区分——若命名冲突则用 `_910` 后缀）。最终落库文件名带 `_910` 后缀：
-        `tests/test_flash_attn_npu_v3_bnsd_910.py`；覆盖 stride 零拷贝路径与 BSND 逐元素相等、
+        `docs/tests/test_flash_attn_npu_v3_bnsd_910.py`；覆盖 stride 零拷贝路径与 BSND 逐元素相等、
         连续 rank-4 回退 BSND、causal、LSE 形状/数值、forward-only 拒绝、`flash_attn_with_kvcache` 的
         `S_alloc > cache_seqlens` 分配平面长度、GQA 多头组（`H_KV >= 2`，因 `H_KV == 1` 时转置视图会被
         `is_contiguous()` 短路而探测失效）
-  - [x] SubTask 5.2: 新增 `tests/test_flash_attn_npu_v4_bnsd.py` 对应用例（v4 无 kvcache 入口）；
-        最终落库为 `tests/test_flash_attn_npu_v4_bnsd_910.py`
-  - [x] SubTask 5.3: 新增 `tests/test_flash_attn_npu_v2_bnsd.py` 对应用例
+  - [x] SubTask 5.2: 新增 `docs/tests/test_flash_attn_npu_v4_bnsd.py` 对应用例（v4 无 kvcache 入口）；
+        最终落库为 `docs/tests/test_flash_attn_npu_v4_bnsd_910.py`
+  - [x] SubTask 5.3: 新增 `docs/tests/test_flash_attn_npu_v2_bnsd.py` 对应用例
         （`flash_attn_func` 与 `flash_attn_with_kvcache`；packed / varlen 入口不做 BNSD 解读）；
-        最终落库为 `tests/test_flash_attn_npu_v2_bnsd_910.py`
+        最终落库为 `docs/tests/test_flash_attn_npu_v2_bnsd_910.py`
   - [x] SubTask 5.4: 三个用例文件在 910 上全部通过；同时确认既有 `tests/test_flash_attn_npu_v{2,3,4}.py`
         中的 950-only 用例与 BNSD 用例互不干扰
 
@@ -245,7 +245,7 @@
         解包（BNSD 取 `(B,H,S,D)` 读法），使 `get_scheduler_metadata` 拿到 kernel 实际运行的
         （padding 后）head dim；BNSD 的 `batch_size/num_heads/seqlen_q/seqlen_k` 也随布局取对
   - [x] SubTask 7.3: 验证——最小复现用例通过；`tests/test_flash_attn_npu_v2.py -k "59 or 111"`
-        38 passed；`tests/test_flash_attn_npu_v2_bnsd_910.py` 12 passed
+        38 passed；`docs/tests/test_flash_attn_npu_v2_bnsd_910.py` 12 passed
 
 - [x] Task 8: 修复 v3 前向 FlashDecode 分支未透传 `outputStride` / `oHeadStride` 导致的 GM 越界写
       （Task 6 回归暴露：`test_fa_kvcache_ops` 中 `[...-20000-59-...-TND-True--1--1-2.0-1-False]`
