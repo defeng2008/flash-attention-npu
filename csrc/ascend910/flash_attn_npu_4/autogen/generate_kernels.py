@@ -13,8 +13,8 @@ from typing import List, Optional
 # the forward (FAInfer) does not bin by head_dim at all (it is a runtime tiling
 # value). So head_dim is deliberately dropped here.
 #
-# The real compile-time axes are dtype and input layout (TND / BSND). Each
-# generated .cpp holds exactly ONE explicit instantiation of the per-family
+# The real compile-time axes are dtype and input layout (TND / BSND / BNSD).
+# Each generated .cpp holds exactly ONE explicit instantiation of the per-family
 # dispatch template, so the heavy kernel templates land in separate,
 # parallel-compiled translation units. The impl bodies live in the shared
 # fwd_dispatch_impl.hpp header (one directory up); this script only emits the
@@ -26,10 +26,11 @@ DTYPE_MAP = {
     "bf16": "bfloat16_t",
 }
 
-# layout key -> (display name, fwd IS_TND bool token)
+# layout key -> (display name, fwd layout enum token)
 LAYOUTS = [
-    ("bsnd", "BSND", "false"),
-    ("tnd",  "TND",  "true"),
+    ("bsnd", "BSND", "FaiKenel::inputLayout::BSND"),
+    ("tnd",  "TND",  "FaiKenel::inputLayout::TND"),
+    ("bnsd", "BNSD", "FaiKenel::inputLayout::BNSD"),
 ]
 
 PRELUDE = (
@@ -52,11 +53,11 @@ def _header(family_desc: str, layout_display: str) -> str:
 
 def fwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     ctype = DTYPE_MAP[dtype_key]
-    layout_key, display, is_tnd = layout
+    layout_key, display, layout_token = layout
     body = (
         _header("forward FAInfer dispatch", display)
         + '#include "../fwd_dispatch_impl.hpp"\n\n'
-        + f"template void launch_fwd_dtype<{ctype}, {is_tnd}>(const FwdLaunchArgs &);"
+        + f"template void launch_fwd_dtype<{ctype}, {layout_token}>(const FwdLaunchArgs &);"
         f"  // {display}\n"
     )
     return Kernel(

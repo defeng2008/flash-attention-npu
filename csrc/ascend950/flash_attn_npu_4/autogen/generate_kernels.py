@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-# Splits the v4 (950) forward FAInfer dispatch into four per-(dtype, layout)
+# Splits the v4 (950) forward FAInfer dispatch into six per-(dtype, layout)
 # translation units so the FAInfer / FAInferDn kernel templates compile in
 # parallel. head_dim is a runtime tiling axis (not a template parameter), so it
 # is not a generation axis. Each generated .cpp holds exactly ONE explicit
-# instantiation of launch_fwd_impl<DType, IS_TND>; the generic dispatch body
+# instantiation of launch_fwd_impl<DType, kLayout>; the generic dispatch body
 # (which selects the per-(dtype, layout) case set with if constexpr) lives in
 # the shared fwd_dispatch_impl.hpp header (one directory up).
 
@@ -20,10 +20,11 @@ DTYPE_MAP = {
     "bf16": "bfloat16_t",
 }
 
-# layout key -> (display name, IS_TND bool token)
+# layout key -> (display name, Format token)
 LAYOUTS = [
-    ("bsnd", "BSND", "false"),
-    ("tnd",  "TND",  "true"),
+    ("bsnd", "BSND", "Format::BSND"),
+    ("tnd",  "TND",  "Format::TND"),
+    ("bnsd", "BNSD", "Format::BNSD"),
 ]
 
 PRELUDE = (
@@ -44,7 +45,7 @@ class Kernel:
 
 def fwd_kernel(dtype_key: str, layout: tuple) -> Kernel:
     ctype = DTYPE_MAP[dtype_key]
-    layout_key, display, is_tnd = layout
+    layout_key, display, fmt = layout
     content = (
         PRELUDE
         + f"// v4 (950) forward FAInfer dispatch, {dtype_key} x {display} variant.\n"
@@ -52,7 +53,7 @@ def fwd_kernel(dtype_key: str, layout: tuple) -> Kernel:
         "// kernel templates compile in parallel across cores; head_dim is a runtime\n"
         "// tiling axis (not a template parameter), so it is not a generation axis.\n\n"
         + '#include "../fwd_dispatch_impl.hpp"\n\n'
-        + f"template void launch_fwd_impl<{ctype}, {is_tnd}>(\n"
+        + f"template void launch_fwd_impl<{ctype}, {fmt}>(\n"
         "    const FwdLaunchArgs &a);\n"
     )
     return Kernel(

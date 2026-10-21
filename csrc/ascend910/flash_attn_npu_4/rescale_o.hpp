@@ -190,9 +190,13 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
         }
     }
 
+    // oHiddenSize is the output row pitch (qHeads * embedV for BSND, embedV for
+    // BNSD); oHeadStride is the step between adjacent heads in GM (embedV for
+    // BSND, maxQSeqlen * embedV for BNSD).
     __aicore__ inline void CopyOToGm(AscendC::GlobalTensor<ElementOutput> gOutput, uint32_t proTokenIdx,
                                      uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum,
-                                     uint32_t qSThisSubBlock, uint32_t embed, uint32_t embedRound, uint32_t oHiddenSize)
+                                     uint32_t qSThisSubBlock, uint32_t embed, uint32_t embedRound, uint32_t oHiddenSize,
+                                     uint32_t oHeadStride)
     {
         uint32_t innerOGmOffset = 0;
         uint32_t innerGOUbOffset = 0;
@@ -200,14 +204,14 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
             AscendC::DataCopyPad(gOutput[innerOGmOffset + proTokenIdx * oHiddenSize], goUbTensor16[innerGOUbOffset],
                                  AscendC::DataCopyExtParams(proTokenNum, embed * SIZE_OF_16BIT, 0,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
-            innerOGmOffset += embed;
+            innerOGmOffset += oHeadStride;
             innerGOUbOffset += proTokenNum * embedRound;
         }
         for (uint32_t qN_idx = 0; qN_idx < integralHeadNum; qN_idx++) {
             AscendC::DataCopyPad(gOutput[innerOGmOffset], goUbTensor16[innerGOUbOffset],
                                  AscendC::DataCopyExtParams(qSThisSubBlock, embed * SIZE_OF_16BIT, 0,
                                                             (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
-            innerOGmOffset += embed;
+            innerOGmOffset += oHeadStride;
             innerGOUbOffset += qSThisSubBlock * embedRound;
         }
         if (epiTokenNum != 0U) {
@@ -260,7 +264,8 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
                    uint32_t isLastRowLoop, uint32_t rowOffsetLoop, uint32_t proTokenIdx, uint32_t proTokenNum,
                    uint32_t epiTokenNum, uint32_t integralHeadNum, const SplitKVParams& splitParams,
                    uint32_t rowOffsetCurLoop, int32_t delStartRow, int32_t delEndRow, uint32_t qSeqlen,
-                   uint32_t qSBlockIdx, uint32_t rowNum, uint32_t inRowOffsetThisSubBlock, uint32_t curQNBlockTile)
+                   uint32_t qSBlockIdx, uint32_t rowNum, uint32_t inRowOffsetThisSubBlock, uint32_t curQNBlockTile,
+                   uint32_t oHeadStride)
     {
         uint32_t curRowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -531,7 +536,7 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
                               qSThisSubBlock, embed, embedRound, oHiddenSize, oHiddenSize_gmlo);
             } else {
                 CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
-                          embedRound, oHiddenSize);
+                          embedRound, oHiddenSize, oHeadStride);
             }
         } else if (needRowLoop) {
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID5);
@@ -547,7 +552,7 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
                AscendC::GlobalTensor<ElementUpdate> gUpdate, AscendC::GlobalTensor<ElementLse> gLse,
                const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
                const LayoutLse& layoutLse, GemmCoord actualBlockShape, uint32_t qSBlockSize, uint32_t qNBlockSize,
-               uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
+               uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod, uint32_t oHeadStride,
                const SplitKVParams& splitParams = SplitKVParams(), int32_t delStartRow = 0, int32_t delEndRow = 0,
                uint32_t qSeqlen = 0, uint32_t qSBlockIdx = 0, uint32_t curQNBlockTile = 1)
     {
@@ -569,7 +574,7 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
         uint32_t inRowActualThisSubBlock = (subBlockIdx == 1U) ? (rowNum - inRowSplitSubBlock) : inRowSplitSubBlock;
         uint32_t inRowOffsetThisSubBlock = subBlockIdx * inRowSplitSubBlock;
         uint32_t outRowOffsetThisSubBlock = (qNBlockSize == 1U) ? inRowOffsetThisSubBlock : 0;
-        uint32_t outColOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock * embed;
+        uint32_t outColOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock * oHeadStride;
         uint32_t qSThisSubBlock = (qNBlockSize == 1U) ? inRowActualThisSubBlock : qSBlockSize;
         int64_t outOffsetSubBlock =
             layoutOutput.GetOffset(MatrixCoord(outRowOffsetThisSubBlock, outColOffsetThisSubBlock));
@@ -623,7 +628,7 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
                     (rowLoopIdx == (rowLoop - 1U)) ? inRowActualThisSubBlock - rowLoopIdx * rowNumTile : rowNumTile;
 
                 int64_t offsetOutput =
-                    static_cast<int64_t>(rowLoopIdx * rowNumTile / qSThisSubBlock * embed) + outOffsetSubBlock;
+                    static_cast<int64_t>(rowLoopIdx * rowNumTile / qSThisSubBlock * oHeadStride) + outOffsetSubBlock;
 
                 // FD: advance gCombineo to the current row-loop's tile offset.
                 int64_t gmloffset = 0;
@@ -653,7 +658,8 @@ class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_, float>, OutputType_, Inp
                                qSThisSubBlock, inRowActualThisSubBlock, isFirstStackTile, isLastStackTile,
                                curStackTileMod, needRowLoop, (rowLoopIdx == rowLoop - 1U), rowOffsetLoop, proTokenIdx,
                                proTokenNum, epiTokenNum, integralHeadNum, blockParams, rowOffsetCurLoop, delStartRow,
-                               delEndRow, qSeqlen, qSBlockIdx, rowNum, inRowOffsetThisSubBlock, curQNBlockTile);
+                               delEndRow, qSeqlen, qSBlockIdx, rowNum, inRowOffsetThisSubBlock, curQNBlockTile,
+                               oHeadStride);
             }
         }
     }

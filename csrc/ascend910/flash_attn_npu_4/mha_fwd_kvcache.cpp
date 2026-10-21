@@ -139,6 +139,8 @@ class FAInferKernel {
         softcapValue = fARuntimeData->softcapValue;
         maxQSeqlen = fATilingData->maxQSeqlen;
         const uint32_t maxKvSeqlen = fATilingData->maxKvSeqlen;
+        // BNSD only: allocated per-head KV plane length (k.size(2)); 0 otherwise.
+        kvSeqlenAllocated = static_cast<uint32_t>(params.kvSeqlenAllocated);
         flashDecodeFlag = fATilingData->flashDecodeFlag;
 
         // FD workspace sizing: reserve head of workspace for gLseFD/gOFD.
@@ -279,10 +281,33 @@ class FAInferKernel {
 
         coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
 #endif
-        strideQ = static_cast<uint64_t>(qHeads * embed);
-        strideO = static_cast<uint64_t>(qHeads * embedV);
-        strideK = static_cast<uint64_t>(kvHeads * embed);
-        strideV = static_cast<uint64_t>(kvHeads * embedV);
+        // Addressing is derived from the (compile-time) input layout.
+        //   BSND / TND: Q/K/O are (..., S, H*D) row-major; the sequence step is
+        //     H*D (= strideQ/strideO/strideK/strideV) and the head step is D.
+        //   BNSD: Q/K/O are (B, H, S, D) with one contiguous plane per head; the
+        //     sequence step is D and the head step is the per-head plane size
+        //     (maxQSeqlen * D for Q/O, kvSeqlenAllocated * D for K/V).
+        if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
+            strideQ = static_cast<uint64_t>(embed);
+            strideO = static_cast<uint64_t>(embedV);
+            strideK = static_cast<uint64_t>(embed);
+            strideV = static_cast<uint64_t>(embedV);
+            qHeadStride = static_cast<uint64_t>(maxQSeqlen) * embed;
+            oHeadStride = static_cast<uint64_t>(maxQSeqlen) * embedV;
+            kvHeadStrideK = static_cast<uint64_t>(kvSeqlenAllocated) * embed;
+            kvHeadStrideV = static_cast<uint64_t>(kvSeqlenAllocated) * embedV;
+            oRowStride = static_cast<uint64_t>(embedV);
+        } else {
+            strideQ = static_cast<uint64_t>(qHeads * embed);
+            strideO = static_cast<uint64_t>(qHeads * embedV);
+            strideK = static_cast<uint64_t>(kvHeads * embed);
+            strideV = static_cast<uint64_t>(kvHeads * embedV);
+            qHeadStride = static_cast<uint64_t>(embed);
+            oHeadStride = static_cast<uint64_t>(embedV);
+            kvHeadStrideK = static_cast<uint64_t>(embed);
+            kvHeadStrideV = static_cast<uint64_t>(embedV);
+            oRowStride = static_cast<uint64_t>(qHeads * embedV);
+        }
         embedRound = RoundUp(embed, FaiKenel::BLOCK_SIZE);
         embedRoundV = RoundUp(embedV, FaiKenel::BLOCK_SIZE);
         groupSize = qHeads / kvHeads;
@@ -494,28 +519,54 @@ class FAInferKernel {
                 prevKvSeqlenSum = static_cast<uint32_t>(gActualKvseqlen.GetValue(BIdx));
             }
         } else {
-            // BSND: Q/O/LSE per-batch storage step is maxQSeqlen.
+            // BSND / BNSD: Q/O/LSE per-batch storage step is maxQSeqlen.
             prevQSeqlenSum = BIdx * maxQSeqlen;
             if constexpr (!PAGED_CACHE_FLAG) {
-                // BSND K seqlens are not variable, just multiply by the batch index to get the offset.
-                prevKvSeqlenSum = static_cast<uint32_t>(gActualKvseqlen.GetValue(0)) * BIdx;
+                if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
+                    // BNSD K/V are per-(batch, head) planes of constant pitch, so the
+                    // batch step is a constant (handled in kBOffset/vBOffset below)
+                    // and does not depend on the per-batch used KV length.
+                    prevKvSeqlenSum = 0;
+                } else {
+                    // BSND K seqlens are not variable, just multiply by the batch
+                    // index to get the offset.
+                    prevKvSeqlenSum = static_cast<uint32_t>(gActualKvseqlen.GetValue(0)) * BIdx;
+                }
             }
         }
 
-        uint64_t qBOffset = static_cast<uint64_t>(prevQSeqlenSum) * strideQ;
+        uint64_t qBOffset = 0;
         uint64_t kBOffset = 0;
         uint64_t vBOffset = 0;
         uint64_t blockBOffset = 0;
-        if constexpr (!PAGED_CACHE_FLAG) {
-            kBOffset = static_cast<uint64_t>(prevKvSeqlenSum) * strideK;
-            vBOffset = static_cast<uint64_t>(prevKvSeqlenSum) * strideV;
+        uint64_t oBOffset = 0;
+        if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
+            // BNSD: each batch is a fixed set of qHeads / kvHeads planes; the batch
+            // base is the plane size times the head count (no dependence on the
+            // per-batch used sequence lengths).
+            qBOffset = static_cast<uint64_t>(BIdx) * qHeads * qHeadStride;
+            oBOffset = static_cast<uint64_t>(BIdx) * qHeads * oHeadStride;
+            if constexpr (!PAGED_CACHE_FLAG) {
+                kBOffset = static_cast<uint64_t>(BIdx) * kvHeads * kvHeadStrideK;
+                vBOffset = static_cast<uint64_t>(BIdx) * kvHeads * kvHeadStrideV;
+            } else {
+                blockBOffset = static_cast<uint64_t>(BIdx) * blockTableStride;
+            }
         } else {
-            blockBOffset = static_cast<uint64_t>(BIdx) * blockTableStride;
+            qBOffset = static_cast<uint64_t>(prevQSeqlenSum) * strideQ;
+            oBOffset = static_cast<uint64_t>(prevQSeqlenSum) * strideO;
+            if constexpr (!PAGED_CACHE_FLAG) {
+                kBOffset = static_cast<uint64_t>(prevKvSeqlenSum) * strideK;
+                vBOffset = static_cast<uint64_t>(prevKvSeqlenSum) * strideV;
+            } else {
+                blockBOffset = static_cast<uint64_t>(BIdx) * blockTableStride;
+            }
         }
-        uint64_t oBOffset = static_cast<uint64_t>(prevQSeqlenSum) * strideO;
         // LSE flat offset depends on the output layout the host allocates:
         //   BSND -> (batch, num_heads, seqlen) batch-major: head stride = maxQSeqlen,
         //           each batch occupies prevQSeqlenSum * qHeads elements.
+        //   BNSD -> same as BSND: LSE is host-allocated as (batch, num_heads, seqlen)
+        //           and the per-batch Q base step is maxQSeqlen.
         //   TND  -> (num_heads, total_q) head-major: head stride = totalQTokens,
         //           per-batch tokens are concatenated along the fast dim, so the
         //           per-batch offset is just prevQSeqlenSum (not scaled by qHeads).
@@ -540,11 +591,11 @@ class FAInferKernel {
         uint32_t qNStartIdx = kvNIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile;
 
         uint64_t gmOffsetQ = qBOffset + static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideQ +
-                             static_cast<uint64_t>(qNStartIdx * embed);
-        uint64_t gmOffsetK = kBOffset + static_cast<uint64_t>(kvNIdx * embed);
-        uint64_t gmOffsetV = vBOffset + static_cast<uint64_t>(kvNIdx * embedV);
+                             static_cast<uint64_t>(qNStartIdx) * qHeadStride;
+        uint64_t gmOffsetK = kBOffset + static_cast<uint64_t>(kvNIdx) * kvHeadStrideK;
+        uint64_t gmOffsetV = vBOffset + static_cast<uint64_t>(kvNIdx) * kvHeadStrideV;
         uint64_t gmOffsetO = oBOffset + static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideO +
-                             static_cast<uint64_t>(qNStartIdx * embedV);
+                             static_cast<uint64_t>(qNStartIdx) * oHeadStride;
         uint64_t gmOffsetLse = lseBOffset + static_cast<uint64_t>(qNStartIdx) * lseHeadStride +
                                static_cast<uint64_t>(qSBlockIdx * curQSBlockTile);
 
@@ -641,21 +692,26 @@ class FAInferKernel {
         if (kvStart >= kvEnd) {
 #ifdef __DAV_C220_VEC__
             if (!isSplitKV) {
-                LayoutO layoutOInit(qSeqlen, embed * qHeads);
+                LayoutO layoutOInit(qSeqlen, static_cast<uint32_t>(oRowStride));
                 LayoutLse layoutLseInit(qHeads, lseHeadStride);
                 EpilogueInitOut epilogueInitOut(resource);
-                epilogueInitOut(gO[gmOffsetO], gLse[gmOffsetLse], layoutOInit, layoutLseInit, qSBlockSize, qNBlockSize);
+                epilogueInitOut(gO[gmOffsetO], gLse[gmOffsetLse], layoutOInit, layoutLseInit, qSBlockSize, qNBlockSize,
+                                embedV, static_cast<uint32_t>(oHeadStride));
             }
 #endif
             return;
         }
 #ifdef __DAV_C220_CUBE__
-        LayoutQ layoutQTemp(rowNum, embed);
+        // layoutQTemp carries the per-head plane pitch as its row stride (used by
+        // the Nd2Nz load as the source row distance): embed for BSND / TND,
+        // maxQSeqlen * embed for BNSD. The token stride (distance between Q
+        // token groups) is strideQ (qHeads * embed for BSND / TND, embed for BNSD).
+        LayoutQ layoutQTemp(rowNum, embed, static_cast<uint32_t>(qHeadStride));
         LayoutK layoutKTemp(strideK, stackSeqTile);
         LayoutV layoutVTemp(stackSeqTile, strideV);
         blockMmadQK.resetBlockStart(kvStart, pagedBlockSize);
         blockMmadPV.resetBlockStart(kvStart, pagedBlockSize);
-        blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, qHeads);
+        blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, static_cast<uint32_t>(strideQ));
 #endif
         for (uint32_t kvSIdx = kvStart; kvSIdx < kvEnd + preKVNum; kvSIdx++) {
             if (kvSIdx < kvEnd) {
@@ -808,7 +864,7 @@ class FAInferKernel {
                 Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
 #endif
 #ifdef __DAV_C220_VEC__
-                LayoutO layoutO(qSeqlen, embed * qHeads);
+                LayoutO layoutO(qSeqlen, static_cast<uint32_t>(oRowStride));
                 LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
                 LayoutLse layoutLse(qHeads, (INPUT_LAYOUT == FaiKenel::inputLayout::TND) ? totalQTokens : maxQSeqlen);
                 uint64_t gmOffsetUpdate = (uint64_t)(coreIdx * WORKSPACE_BLOCK_SIZE_DB);
@@ -827,12 +883,13 @@ class FAInferKernel {
                     epilogueRescaleO(gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse],
                                      layoutO, layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize,
                                      qNBlockSize, (stackSeqCount - PRE_LAUNCH == 0), nowkvSIdx + 1 >= kvEnd,
-                                     curStackTileMod, splitParams);
+                                     curStackTileMod, static_cast<uint32_t>(oHeadStride), splitParams);
                 } else {
                     epilogueRescaleO(gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse],
                                      layoutO, layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize,
                                      qNBlockSize, (stackSeqCount - PRE_LAUNCH == 0), nowkvSIdx + 1 >= kvSLoopNumTotal,
-                                     curStackTileMod, typename EpilogueRescaleO::SplitKVParams(), delStartRow,
+                                     curStackTileMod, static_cast<uint32_t>(oHeadStride),
+                                     typename EpilogueRescaleO::SplitKVParams(), delStartRow,
                                      delEndRow, qSeqlen, qSBlockIdx, curQNBlockTile);
                 }
 #endif
@@ -862,12 +919,22 @@ class FAInferKernel {
     float softcapValue;
     uint32_t totalQTokens;
     uint32_t maxQSeqlen;
+    // BNSD only: allocated per-head KV plane length (k.size(2)); 0 otherwise.
+    uint32_t kvSeqlenAllocated;
     uint32_t flashDecodeFlag;
 
+    // Sequence-step strides (row pitch of the sequence dim).
     uint64_t strideQ;
     uint64_t strideO;
     uint64_t strideK;
     uint64_t strideV;
+    // Per-head plane pitches (layout dependent).
+    uint64_t qHeadStride;
+    uint64_t oHeadStride;
+    uint64_t kvHeadStrideK;
+    uint64_t kvHeadStrideV;
+    // Output row pitch: qHeads * embedV (BSND / TND) or embedV (BNSD).
+    uint64_t oRowStride;
     uint32_t embedRound;
     uint32_t embedRoundV;
     uint32_t groupSize;
@@ -892,7 +959,8 @@ template <typename InputDtypeQ = half, typename InputDtypeKv = half, typename In
 __global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask,
                                    GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse, GM_ADDR actualQseqlen,
                                    GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling, GM_ADDR runtime,
-                                   uint64_t blockTableStride, GM_ADDR seqUsedQ, GM_ADDR seqUsedKv)
+                                   uint64_t blockTableStride, GM_ADDR seqUsedQ, GM_ADDR seqUsedKv,
+                                   int64_t kvSeqlenAllocated)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
 
@@ -951,7 +1019,8 @@ __global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_A
                                             PagedCacheFlag, maskCategory, inLayout, CombineScale>;
 
     FAIKernelParams params{q,   k,         v,      mask,    blockTables,      actualQseqlen, actualKvseqlen, o,
-                           lse, workspace, tiling, runtime, blockTableStride, seqUsedQ,      seqUsedKv};
+                           lse, workspace, tiling, runtime, blockTableStride, seqUsedQ,      seqUsedKv,
+                           kvSeqlenAllocated};
     FAInferKernelType flashAttnInfer;
     flashAttnInfer(params);
 }

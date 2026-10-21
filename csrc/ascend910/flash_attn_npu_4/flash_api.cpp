@@ -116,7 +116,7 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> gather_kv_indices_, std::optional<float> softmax_scale_, bool is_causal,
     int64_t window_size_left, int64_t window_size_right, float softcap, int64_t num_splits,
     std::optional<bool> pack_gqa_, std::optional<at::Tensor> learnable_sink_,
-    std::optional<at::Tensor> scheduler_metadata_, int64_t sm_margin)
+    std::optional<at::Tensor> scheduler_metadata_, int64_t sm_margin, int64_t layout)
 {
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
@@ -175,6 +175,19 @@ std::vector<at::Tensor> mha_fwd(
     TORCH_CHECK(!gather_kv_indices_.has_value(), "NPU FlashAttention does not support gather_kv_indices");
     TORCH_CHECK(!learnable_sink_.has_value(), "NPU FlashAttention does not support learnable_sink");
 
+    // Input layout (Q/K/V share one layout): 0 = TND (varlen packed),
+    // 1 = BSND, 2 = BNSD. TND is exactly the cu_seqlens_q (varlen-q) form, and
+    // varlen-q is only supported with TND.
+    TORCH_CHECK(layout >= 0 && layout <= 2, "layout must be 0 (TND), 1 (BSND) or 2 (BNSD)");
+    const bool is_tnd_layout = (layout == 0);
+    const bool is_bnsd_layout = (layout == 2);
+    if (is_bnsd_layout) {
+        TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4,
+                    "layout 2 (BNSD) requires rank-4 q, k, v of shape (batch, heads, seqlen, dim)");
+        TORCH_CHECK(!paged_KV, "layout 2 (BNSD) does not support paged KV cache");
+        TORCH_CHECK(!is_varlen_kv, "layout 2 (BNSD) does not support cu_seqlens_k");
+    }
+
     if (is_varlen_kv) {
         cu_seqlens_k = cu_seqlens_k_.value();
         TORCH_CHECK(!paged_KV, "If cu_seqlens_k is passed in, then paged table is not supported");
@@ -200,6 +213,12 @@ std::vector<at::Tensor> mha_fwd(
         seqlen_q = static_cast<int>(max_seqlen_q_.value());
         num_heads = sizes[1];
         head_size_og = sizes[2];
+    } else if (is_bnsd_layout) {
+        // BNSD: (batch, heads, seqlen, dim)
+        batch_size = sizes[0];
+        num_heads = sizes[1];
+        seqlen_q = sizes[2];
+        head_size_og = sizes[3];
     } else {
         batch_size = sizes[0];
         seqlen_q = sizes[1];
@@ -211,7 +230,10 @@ std::vector<at::Tensor> mha_fwd(
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : k.size(0);
     const int page_block_size = !paged_KV ? 128 : k.size(1);
-    const int num_heads_k = k.dim() == 3 ? k.size(1) : k.size(2);
+    // BNSD k is (batch, heads, seqlen, dim) -> heads at dim 1; varlen k is
+    // (total, heads, dim) -> heads at dim 1; BSND k is (batch, seqlen, heads, dim)
+    // -> heads at dim 2.
+    const int num_heads_k = (is_bnsd_layout || k.dim() == 3) ? k.size(1) : k.size(2);
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     // head dim 512 routes to the head-dim-split layout; Q rank and page_table
     // select TND/BSND and paged/dense, so neither is restricted.
@@ -229,7 +251,8 @@ std::vector<at::Tensor> mha_fwd(
                 cu_seqlens_k.slice(0, 1, cu_seqlens_k.size(0)) - cu_seqlens_k.slice(0, 0, cu_seqlens_k.size(0) - 1);
             seqlens_k = seqlens_k.to(torch::kInt32);
         } else {
-            int64_t seqlen_k_val = k.size(1);
+            // BNSD k is (batch, heads, seqlen, dim) -> seqlen at dim 2.
+            int64_t seqlen_k_val = is_bnsd_layout ? k.size(2) : k.size(1);
             seqlens_k = at::full({batch_size}, seqlen_k_val, at::dtype(torch::kInt32).device(k.device()));
         }
     }
@@ -294,7 +317,9 @@ std::vector<at::Tensor> mha_fwd(
                 max_kv_seqlen = static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size;
             }
         } else {
-            max_kv_seqlen = k.size(1);
+            // Non-paged, non-varlen: the KV sequence dim is k.size(1) for BSND /
+            // TND but k.size(2) for BNSD (batch, heads, seqlen, dim).
+            max_kv_seqlen = is_bnsd_layout ? k.size(2) : k.size(1);
         }
     } else {
         seqlens_k_cpu_tensor = seqlens_k.to(at::Device(at::kCPU));
@@ -318,6 +343,14 @@ std::vector<at::Tensor> mha_fwd(
             }
             seqlens_q_cpu = dst;
         }
+    }
+
+    // BNSD allocates a fixed per-head KV plane of length k.size(2); the used KV
+    // length may not exceed it. Other layouts pack KV densely (no over-allocation).
+    const int64_t kv_seqlen_allocated = is_bnsd_layout ? static_cast<int64_t>(k.size(2)) : 0;
+    if (is_bnsd_layout) {
+        TORCH_CHECK(max_kv_seqlen <= kv_seqlen_allocated,
+                    "BNSD layout requires the used KV length (max cache_seqlens) <= k.size(2) (allocated KV length)");
     }
 
     // Window normalization + mask derivation against the actual max KV length,
@@ -596,10 +629,10 @@ std::vector<at::Tensor> mha_fwd(
     auto kvSeqDevice = static_cast<uint8_t*>(seqlenk_gpu_tensor.data_ptr());
     auto workspaceDevice = static_cast<uint8_t*>(workspace_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmaxlse.data_ptr());
-    // Forward kernel launches live in fwd_dispatch_<dtype>_<layout>.cpp. Layout
-    // is selected at runtime by is_varlen_q (varlen => TND, else BSND); dtype
-    // and paged/causal are resolved inside the dispatch. flashDecodeFlag only
-    // affects tiling (fa_split), not a FAInfer template arg.
+    // Forward kernel launches live in fwd_dispatch_<dtype>_<layout>.cpp. The
+    // Q/K/V input layout is selected at runtime by `layout` (0=TND, 1=BSND,
+    // 2=BNSD); dtype and paged/causal are resolved inside the dispatch.
+    // flashDecodeFlag only affects tiling (fa_split), not a FAInfer template arg.
     FwdLaunchArgs fwd_args;
     fwd_args.launchBlockDim = launchBlockDim;
     fwd_args.aclStream = aclStream;
@@ -610,6 +643,9 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.is_local = is_local;
     fwd_args.flashDecodeFlag = flashDecodeFlag;
     fwd_args.has_softcap = has_softcap;
+    fwd_args.layout = is_bnsd_layout ? FaiKenel::inputLayout::BNSD
+                                     : (is_tnd_layout ? FaiKenel::inputLayout::TND : FaiKenel::inputLayout::BSND);
+    fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;
     fwd_args.sequsedQDevice = seqused_q_.has_value() ? static_cast<uint8_t*>(seqused_q_.value().data_ptr()) : nullptr;
     fwd_args.sequsedKVDevice = seqused_k_.has_value() ? static_cast<uint8_t*>(seqused_k_.value().data_ptr()) : nullptr;
     fwd_args.qDevice = qDevice;
@@ -633,11 +669,13 @@ std::vector<at::Tensor> mha_fwd(
     // from reading uninitialized tiling on the first call in a fresh process.
     // seqlenk_gpu_tensor is captured by value to keep it alive for the deferred
     // task (the lambda outlives the local tensor scope).
-    auto launch_fa_infer = [fwd_args, is_varlen_q, seqlenk_gpu_tensor]() -> int {
-        if (is_varlen_q) {
-            launch_fwd<true>(fwd_args);
+    auto launch_fa_infer = [fwd_args, seqlenk_gpu_tensor]() -> int {
+        if (fwd_args.layout == FaiKenel::inputLayout::TND) {
+            launch_fwd<FaiKenel::inputLayout::TND>(fwd_args);
+        } else if (fwd_args.layout == FaiKenel::inputLayout::BNSD) {
+            launch_fwd<FaiKenel::inputLayout::BNSD>(fwd_args);
         } else {
-            launch_fwd<false>(fwd_args);
+            launch_fwd<FaiKenel::inputLayout::BSND>(fwd_args);
         }
         return 0;
     };

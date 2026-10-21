@@ -96,15 +96,20 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
         l1KDynamic = kDyn;
     }
 
+    // layoutA carries the per-head plane pitch in its row stride (stride(0)):
+    // embed for BSND / TND, maxQSeqlen * embed for BNSD. That value is the
+    // Nd2Nz source row distance (srcDValue). srcNdStride is the distance
+    // between successive token groups (= the Q token stride): qHeads * embed
+    // for BSND / TND, embed for BNSD.
     __aicore__ inline void loadQGM(AscendC::GlobalTensor<ElementA> gA, LayoutA layoutA, uint32_t rowNum,
-                                   uint32_t& singleGroupHeads, uint32_t& qHeads)
+                                   uint32_t& singleGroupHeads, uint32_t srcNdStride)
     {
         uint32_t embed = layoutA.shape(1);
         uint32_t rowNumRound = RoundUp(rowNum, L1AAlignHelper::M_ALIGNED);
         uint32_t tokenNumPerGroup = rowNum / singleGroupHeads;
         auto layoutSingleANd = layoutA.GetTileLayout(MakeCoord(singleGroupHeads, embed));
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
-        copyGmToL1A(l1ATensor, gA, layoutAInL1, layoutSingleANd, tokenNumPerGroup, qHeads * embed, tokenNumPerGroup,
+        copyGmToL1A(l1ATensor, gA, layoutAInL1, layoutSingleANd, tokenNumPerGroup, srcNdStride, tokenNumPerGroup,
                     BLOCK_SIZE, rowNumRound);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);

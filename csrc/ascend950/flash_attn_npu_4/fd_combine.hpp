@@ -455,7 +455,8 @@ CATLASS_GLOBAL void FAFlashDecodeCombine(
     GM_ADDR workspace, GM_ADDR tiling, GM_ADDR runtimeTiling)
 {
     FAIKernelParams params{q, k, v, mask, blockTables,
-        actualQseqlen, actualKvseqlen, seqUsedQ, seqUsedKv, o, lse, workspace, tiling, runtimeTiling};
+        actualQseqlen, actualKvseqlen, seqUsedQ, seqUsedKv, o, lse, workspace, tiling, runtimeTiling,
+        0};
     FlashDecodeCombine950<InDtype> combine;
     combine(params);
 }

@@ -217,17 +217,18 @@ public:
 
     __aicore__ inline
     void CopyOToGm(AscendC::GlobalTensor<ElementOutput> gOutput, uint32_t proTokenIdx, uint32_t proTokenNum,
-        uint32_t epiTokenNum, uint32_t integralHeadNum, uint32_t qSThisSubBlock, uint32_t embed, uint32_t embedRound, uint32_t oHiddenSize)
+        uint32_t epiTokenNum, uint32_t integralHeadNum, uint32_t qSThisSubBlock, uint32_t embed, uint32_t embedRound,
+        uint32_t outputStride, uint32_t oHeadStride)
     {
         uint32_t innerOGmOffset = 0;
         uint32_t innerGOUbOffset = 0;
         if (proTokenNum != 0U) {
             AscendC::DataCopyPad(
-                gOutput[innerOGmOffset + proTokenIdx * oHiddenSize],
+                gOutput[innerOGmOffset + proTokenIdx * outputStride],
                 goUbTensor16[innerGOUbOffset],
                 AscendC::DataCopyExtParams(
-                    proTokenNum, embed * SIZE_OF_16BIT, 0, (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
-            innerOGmOffset += embed;
+                    proTokenNum, embed * SIZE_OF_16BIT, 0, (outputStride - embed) * SIZE_OF_16BIT, 0));
+            innerOGmOffset += oHeadStride;
             innerGOUbOffset += proTokenNum * embedRound;
         }
         for (uint32_t qN_idx = 0; qN_idx < integralHeadNum; qN_idx++) {
@@ -235,8 +236,8 @@ public:
                 gOutput[innerOGmOffset],
                 goUbTensor16[innerGOUbOffset],
                 AscendC::DataCopyExtParams(
-                    qSThisSubBlock, embed * SIZE_OF_16BIT, 0, (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
-            innerOGmOffset += embed;
+                    qSThisSubBlock, embed * SIZE_OF_16BIT, 0, (outputStride - embed) * SIZE_OF_16BIT, 0));
+            innerOGmOffset += oHeadStride;
             innerGOUbOffset += qSThisSubBlock * embedRound;
         }
         if (epiTokenNum != 0U) {
@@ -244,7 +245,7 @@ public:
                 gOutput[innerOGmOffset],
                 goUbTensor16[innerGOUbOffset],
                 AscendC::DataCopyExtParams(
-                    epiTokenNum, embed * SIZE_OF_16BIT, 0, (oHiddenSize - embed) * SIZE_OF_16BIT, 0));
+                    epiTokenNum, embed * SIZE_OF_16BIT, 0, (outputStride - embed) * SIZE_OF_16BIT, 0));
         }
     }
 
@@ -305,7 +306,8 @@ public:
         uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum,
         const SplitKVParams &splitParams,
         uint32_t rowOffsetCurLoop, int32_t invalidSuffixStartRow, int32_t invalidPrefixEndRow, uint32_t qSeqlen,
-        uint32_t qSBlockIdx, uint32_t rowNum, uint32_t inRowOffsetThisSubBlock, uint32_t curQNBlockTile)
+        uint32_t qSBlockIdx, uint32_t rowNum, uint32_t inRowOffsetThisSubBlock, uint32_t curQNBlockTile,
+        uint32_t outputStride, uint32_t oHeadStride)
     {
         uint32_t curRowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -491,7 +493,7 @@ public:
             } else {
                 CopyOToGm(
                     gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum,
-                    qSThisSubBlock, embed, embedRound, oHiddenSize);
+                    qSThisSubBlock, embed, embedRound, outputStride, oHeadStride);
             }
 
             if constexpr (LSE_MODE_ == LseModeT::OUT_ONLY) {
@@ -651,9 +653,10 @@ public:
         uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
         uint32_t taskStateSlot,
-        const SplitKVParams& splitParams = SplitKVParams(),
-        int32_t invalidSuffixStartRow = 0, int32_t invalidPrefixEndRow = 0, uint32_t qSeqlen = 0,
-        uint32_t qSBlockIdx = 0, uint32_t curQNBlockTile = 1)
+        const SplitKVParams& splitParams,
+        int32_t invalidSuffixStartRow, int32_t invalidPrefixEndRow, uint32_t qSeqlen,
+        uint32_t qSBlockIdx, uint32_t curQNBlockTile,
+        uint32_t outputStride, uint32_t oHeadStride)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
@@ -673,10 +676,14 @@ public:
         uint32_t inRowActualThisSubBlock = (subBlockIdx == 1U) ? (rowNum - inRowSplitSubBlock) : inRowSplitSubBlock;
         uint32_t inRowOffsetThisSubBlock = subBlockIdx * inRowSplitSubBlock;
         uint32_t outRowOffsetThisSubBlock = (qNBlockSize == 1U) ? inRowOffsetThisSubBlock : 0;
+        uint32_t outHeadOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock;
         uint32_t outColOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock * embed;
         uint32_t qSThisSubBlock = (qNBlockSize == 1U) ? inRowActualThisSubBlock : qSBlockSize;
+        // Rows step by the token stride, heads by the per-head plane pitch (BSND:
+        // qHeads*embedV / embedV; BNSD: embedV / S_alloc*embedV).
         int64_t outOffsetSubBlock =
-            layoutOutput.GetOffset(MatrixCoord(outRowOffsetThisSubBlock, outColOffsetThisSubBlock));
+            static_cast<int64_t>(outRowOffsetThisSubBlock) * outputStride +
+            static_cast<int64_t>(outHeadOffsetThisSubBlock) * oHeadStride;
 
         // FD: resolve per-subblock offset for the partial O buffer (gCombineo).
         int64_t gmlooutOffsetSubBlock = 0;
@@ -734,8 +741,10 @@ public:
                 uint32_t rowActualCurLoop =
                     (rowLoopIdx == (rowLoop - 1U)) ? inRowActualThisSubBlock - rowLoopIdx * rowNumTile : rowNumTile;
 
+                // Row loops advance whole heads only; the token-in-head offset is
+                // folded into CopyOToGm's proTokenIdx term.
                 int64_t offsetOutput =
-                    static_cast<int64_t>(rowLoopIdx * rowNumTile / qSThisSubBlock * embed) + outOffsetSubBlock;
+                    static_cast<int64_t>(rowLoopIdx * rowNumTile / qSThisSubBlock) * oHeadStride + outOffsetSubBlock;
 
                 // FD: advance gCombineo to the current row-loop's tile offset.
                 int64_t gmloffset = 0;
@@ -796,7 +805,9 @@ public:
                     qSBlockIdx,
                     rowNum,
                     inRowOffsetThisSubBlock,
-                    curQNBlockTile);
+                    curQNBlockTile,
+                    outputStride,
+                    oHeadStride);
             }
         }
     }

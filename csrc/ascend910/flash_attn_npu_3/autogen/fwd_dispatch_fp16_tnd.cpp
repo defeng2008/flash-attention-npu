@@ -9,4 +9,4 @@
 
 #include "../fwd_dispatch_impl.hpp"
 
-template void launch_fwd_dtype<half, true>(const FwdLaunchArgs &);  // TND
+template void launch_fwd_dtype<half, FaiKenel::inputLayout::TND>(const FwdLaunchArgs &);  // TND

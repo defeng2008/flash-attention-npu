@@ -13,7 +13,7 @@
 // combo TUs, each of which fixes one (softcap, return_softmax, dropout) triple
 // and instantiates the 6 paged x mask FAInfer variants, so the 48
 // instantiations of a (dtype, layout) family compile in 8 parallel TUs
-// instead of one. The light half (combo selection) lives in
+// (x 3 fwd layouts BSND/TND/BNSD). The light half (combo selection) lives in
 // fwd_dispatch_impl.hpp, which host TUs include without pulling in the
 // kernel templates.
 //
@@ -38,7 +38,8 @@
         <<<a.blockDim, nullptr, a.aclStream>>>(                                              \
             a.fftsAddr, a.qDevice, a.kDevice, a.vDevice, a.maskDevice, a.blockTableDevice,   \
             a.oDevice, a.softmaxLseDevice, a.qSeqDevice, a.kvSeqDevice,                      \
-            a.workspaceDevice, a.tilingDevice, a.alibiSlopesDevice, a.kNewDevice, a.vNewDevice); \
+            a.workspaceDevice, a.tilingDevice, a.alibiSlopesDevice, a.kNewDevice, a.vNewDevice, \
+            a.kv_seqlen_allocated); \
     });
 
 // BOOL_SWITCH-style helper (idea from static_switch.h in flash-attention): each

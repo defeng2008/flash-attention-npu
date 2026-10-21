@@ -228,7 +228,7 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     std::optional<at::Tensor>& out_,                   // batch_size x seqlen_q x num_heads x head_size
     const float softmax_scale, bool is_causal, int window_size_left, int window_size_right, const float softcap,
     bool is_rotary_interleaved, // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
-    int num_splits, std::optional<at::Tensor> scheduler_metadata_)
+    int num_splits, std::optional<at::Tensor> scheduler_metadata_, int64_t layout)
 {
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
@@ -301,23 +301,46 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     } else {
         out = torch::empty_like(q);
     }
+    // Layout code shared with Python: 0 = TND, 1 = BSND, 2 = BNSD. Distinct from the
+    // kernel inputLayout enum values, so map explicitly instead of static_cast.
+    TORCH_CHECK(layout >= 0 && layout <= 2, "fwd_kvcache: layout must be 0 (TND), 1 (BSND) or 2 (BNSD), got ", layout);
+    TORCH_CHECK(layout != 0, "fwd_kvcache: only BSND (1) and BNSD (2) layouts are supported; TND is not");
+    const bool is_bnsd = (layout == 2);
+
+    TORCH_CHECK(q.dim() == 4, "fwd_kvcache: q must be 4-dimensional (BSND or BNSD)");
     const auto sizes = q.sizes();
-    const int batch_size = sizes[0];
-    int seqlen_q = sizes[1];
-    int num_heads = sizes[2];
-    const int head_size_og = sizes[3];
+    const int batch_size = static_cast<int>(sizes[0]);
+    int seqlen_q = is_bnsd ? static_cast<int>(sizes[2]) : static_cast<int>(sizes[1]);
+    int num_heads = is_bnsd ? static_cast<int>(sizes[1]) : static_cast<int>(sizes[2]);
+    const int head_size_og = static_cast<int>(sizes[3]);
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : kcache.size(0);
     const int page_block_size = !paged_KV ? 128 : kcache.size(1);
-    const int num_heads_k = kcache.size(2);
+    const int num_heads_k = is_bnsd ? static_cast<int>(kcache.size(1)) : static_cast<int>(kcache.size(2));
+    // BNSD: the KV head-plane width is the allocated KV S (k.size(2) in BNSD terms).
+    const int64_t kv_seqlen_allocated = is_bnsd ? static_cast<int64_t>(kcache.size(2)) : 0;
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size_og >= 1 && head_size_og <= 256, "FlashAttention only supports head dimension in [1, 256]");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
+    if (is_bnsd) {
+        TORCH_CHECK(!paged_KV, "fwd_kvcache: BNSD layout does not support a block table (paged KV cache)");
+        TORCH_CHECK(kcache.dim() == 4 && vcache.dim() == 4, "fwd_kvcache: BNSD layout requires rank-4 kcache/vcache");
+        TORCH_CHECK(kcache.size(0) == batch_size && vcache.size(0) == batch_size,
+                    "fwd_kvcache: BNSD kcache/vcache batch dim must match q");
+        TORCH_CHECK(kcache.size(1) == num_heads_k && vcache.size(1) == num_heads_k,
+                    "fwd_kvcache: BNSD kcache/vcache head dim must match");
+        TORCH_CHECK(kcache.size(2) == kv_seqlen_allocated && vcache.size(2) == kv_seqlen_allocated,
+                    "fwd_kvcache: BNSD kcache/vcache seqlen dim must match");
+        TORCH_CHECK(kcache.size(3) == head_size_og && vcache.size(3) == head_size_og,
+                    "fwd_kvcache: BNSD kcache/vcache head size must match q");
+    }
+
     const bool appendKV = k_.has_value();
+    TORCH_CHECK(!(appendKV && is_bnsd), "fwd_kvcache: BNSD layout does not support append-KV (k/v)");
     if (!seqlens_k_.has_value()) {
-        int64_t seqlen_k_val = kcache.size(1);
+        int64_t seqlen_k_val = is_bnsd ? static_cast<int64_t>(kcache.size(2)) : static_cast<int64_t>(kcache.size(1));
         seqlens_k = at::full({batch_size}, seqlen_k_val, at::dtype(torch::kInt32).device(kcache.device()));
     }
     int64_t kvCacheSeqlen = 0;
@@ -575,8 +598,9 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     auto kvSeqDevice = static_cast<uint8_t*>(seqlens_k.data_ptr());
     auto workspaceDevice = static_cast<uint8_t*>(workspace_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmaxlse.data_ptr());
-    // Forward kernel launches live in fwd_dispatch_{bf16,fp16}.cpp. BSND path
-    // (IS_TND=false); flash-decode is a runtime tiling flag read by the kernel.
+    // Forward kernel launches live in autogen/fwd_dispatch_<dtype>_<layout>.cpp; the
+    // runtime entry picks the layout from fwd_args.layout. Flash-decode is a runtime
+    // tiling flag read by the kernel.
     FwdLaunchArgs fwd_args;
     fwd_args.blockDim = launchBlockDim;
     fwd_args.aclStream = aclStream;
@@ -587,6 +611,8 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     fwd_args.is_local = is_local;
     fwd_args.flashDecodeFlag = flashDecodeFlag;
     fwd_args.has_softcap = has_softcap;
+    fwd_args.layout = is_bnsd ? FaiKenel::inputLayout::BNSD : FaiKenel::inputLayout::BSND;
+    fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;
     fwd_args.qDevice = qDevice;
     fwd_args.kDevice = kDevice;
     fwd_args.vDevice = vDevice;
@@ -602,7 +628,7 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     fwd_args.tilingDevice = tilingDevice;
     fwd_args.alibiSlopesDevice = alibi.ptr;
     auto launch_fa_infer = [fwd_args]() -> int {
-        launch_fwd<false>(fwd_args);
+        launch_fwd(fwd_args);
         return 0;
     };
     at_npu::native::OpCommand::RunOpApiV2("ascendc_fa_infer", launch_fa_infer);
@@ -616,7 +642,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
                                 std::optional<at::Tensor>& alibi_slopes_, // num_heads or batch_size x num_heads
                                 const float p_dropout, const float softmax_scale, bool is_causal, int window_size_left,
                                 int window_size_right, const float softcap, const bool return_softmax,
-                                std::optional<at::Generator> gen_, std::optional<at::Tensor> scheduler_metadata_)
+                                std::optional<at::Generator> gen_, std::optional<at::Tensor> scheduler_metadata_,
+                                int64_t layout)
 {
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
@@ -635,13 +662,30 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
 
+    // Layout code shared with Python: 0 = TND, 1 = BSND, 2 = BNSD. Distinct from the
+    // kernel inputLayout enum values, so map explicitly instead of static_cast.
+    TORCH_CHECK(layout >= 0 && layout <= 2, "fwd: layout must be 0 (TND), 1 (BSND) or 2 (BNSD), got ", layout);
+    TORCH_CHECK(layout != 0, "fwd: only BSND (1) and BNSD (2) layouts are supported; use varlen_fwd for TND");
+    const bool is_bnsd = (layout == 2);
+
+    TORCH_CHECK(q.dim() == 4, "fwd: q must be 4-dimensional (BSND or BNSD)");
+    if (is_bnsd) {
+        TORCH_CHECK(k.dim() == 4 && v.dim() == 4, "fwd: BNSD layout requires rank-4 k/v");
+    }
     const auto sizes = q.sizes();
-    const int batch_size = sizes[0];
-    int seqlen_q = sizes[1];
-    int num_heads = sizes[2];
-    const int head_size = sizes[3];
-    const int seqlen_k = k.size(1);
-    const int num_heads_k = k.size(2);
+    const int batch_size = static_cast<int>(sizes[0]);
+    int seqlen_q = is_bnsd ? static_cast<int>(sizes[2]) : static_cast<int>(sizes[1]);
+    int num_heads = is_bnsd ? static_cast<int>(sizes[1]) : static_cast<int>(sizes[2]);
+    const int head_size = static_cast<int>(sizes[3]);
+    const int seqlen_k = is_bnsd ? static_cast<int>(k.size(2)) : static_cast<int>(k.size(1));
+    const int num_heads_k = is_bnsd ? static_cast<int>(k.size(1)) : static_cast<int>(k.size(2));
+    const int64_t kv_seqlen_allocated = is_bnsd ? static_cast<int64_t>(k.size(2)) : 0;
+    if (is_bnsd) {
+        TORCH_CHECK(k.size(0) == batch_size && v.size(0) == batch_size, "fwd: BNSD k/v batch dim must match q");
+        TORCH_CHECK(k.size(1) == num_heads_k && v.size(1) == num_heads_k, "fwd: BNSD k/v head dim must match");
+        TORCH_CHECK(k.size(2) == seqlen_k && v.size(2) == seqlen_k, "fwd: BNSD k/v seqlen dim must match");
+        TORCH_CHECK(k.size(3) == head_size && v.size(3) == head_size, "fwd: BNSD k/v head size must match q");
+    }
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size >= 1 && head_size <= 256, "FlashAttention only supports head dimension in [1, 256]");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
@@ -836,7 +880,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     uint8_t* blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
 
     // run kernel
-    // BSND, non-paged forward (IS_TND=false, paged_KV=false, no flash-decode).
+    // Non-paged forward; the layout is carried by fwd_args.layout (BSND or BNSD).
     FwdLaunchArgs fwd_args;
     fwd_args.blockDim = blockDim;
     fwd_args.aclStream = aclStream;
@@ -849,6 +893,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     fwd_args.has_softcap = has_softcap;
     fwd_args.return_softmax = return_softmax;
     fwd_args.has_dropout = has_dropout;
+    fwd_args.layout = is_bnsd ? FaiKenel::inputLayout::BNSD : FaiKenel::inputLayout::BSND;
+    fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;
     fwd_args.qDevice = qDevice;
     fwd_args.kDevice = kDevice;
     fwd_args.vDevice = vDevice;
@@ -864,7 +910,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     fwd_args.tilingDevice = tilingDevice;
     fwd_args.alibiSlopesDevice = alibi.ptr;
     auto launch_fa_infer = [fwd_args]() -> int {
-        launch_fwd<false>(fwd_args);
+        launch_fwd(fwd_args);
         return 0;
     };
     at_npu::native::OpCommand::RunOpApiV2("ascendc_fa_infer", launch_fa_infer);
@@ -1153,7 +1199,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     auto workspaceDevice = static_cast<uint8_t*>(const_cast<void*>(workspace_tensor.data_ptr()));
     auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmaxlse.data_ptr()));
 
-    // TND forward (IS_TND=true); no flash-decode in the varlen path.
+    // TND forward (varlen-packed Q/K/V); no flash-decode in the varlen path.
     FwdLaunchArgs fwd_args;
     fwd_args.blockDim = blockDim;
     fwd_args.aclStream = aclStream;
@@ -1166,6 +1212,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     fwd_args.has_softcap = has_softcap;
     fwd_args.return_softmax = return_softmax;
     fwd_args.has_dropout = has_dropout;
+    fwd_args.layout = FaiKenel::inputLayout::TND;
     fwd_args.qDevice = qDevice;
     fwd_args.kDevice = kDevice;
     fwd_args.vDevice = vDevice;
@@ -1181,7 +1228,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     fwd_args.tilingDevice = tilingDevice;
     fwd_args.alibiSlopesDevice = alibi.ptr;
     auto launch_fa_infer = [fwd_args]() -> int {
-        launch_fwd<true>(fwd_args);
+        launch_fwd(fwd_args);
         return 0;
     };
     at_npu::native::OpCommand::RunOpApiV2("ascendc_fa_infer", launch_fa_infer);
@@ -1396,6 +1443,18 @@ mha_varlen_bwd(const at::Tensor& dout,         // total_q x num_heads x head_siz
     return {dq, dk, dv, softmax_d};
 }
 
+// A rank-4, non-contiguous tensor whose strides match a contiguous BNSD tensor viewed as
+// BSND (stride(3)==1, stride(1)==D, stride(2)==H*D) is a BNSD transposed view. The
+// backward path only implements BSND, so these must be rejected explicitly.
+static bool IsBnsdTransposedView(const at::Tensor& t)
+{
+    if (t.dim() != 4 || t.is_contiguous()) {
+        return false;
+    }
+    const auto s = t.sizes();
+    return t.stride(3) == 1 && t.stride(1) == s[3] && t.stride(2) == s[1] * s[3];
+}
+
 std::vector<at::Tensor>
 mha_bwd(const at::Tensor& dout,                   // batch_size x seqlen_q x num_heads, x multiple_of(head_size_og, 8)
         const at::Tensor& q,                      // batch_size x seqlen_q x num_heads x head_size
@@ -1436,6 +1495,9 @@ mha_bwd(const at::Tensor& dout,                   // batch_size x seqlen_q x num
     auto out_sizes = out.sizes();
     TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4 && dout.dim() == 4 && out.dim() == 4,
                 "mha_bwd: q/k/v/dout/out must be 4-D (BSND)");
+    TORCH_CHECK(!IsBnsdTransposedView(q) && !IsBnsdTransposedView(k) && !IsBnsdTransposedView(v) &&
+                    !IsBnsdTransposedView(out),
+                "mha_bwd: BNSD layout is not supported for backward (forward-only); pass BSND operands");
     TORCH_CHECK(dout_sizes == out_sizes, "mha_bwd: out and dout must have the same shape");
     TORCH_CHECK(dq.sizes() == qsizes && dk.sizes() == ksizes && dv.sizes() == vsizes,
                 "mha_bwd: dq/dk/dv must match q/k/v shapes");

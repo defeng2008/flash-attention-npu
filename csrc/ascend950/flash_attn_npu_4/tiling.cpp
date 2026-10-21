@@ -76,7 +76,7 @@ namespace optiling{
         bool flashDecodeFlag = false;
         uint32_t numSplits = 1;
         bool kvcacheNzFlag = false;
-        bool isTnd = false;
+        FwdLayout layout = FwdLayout::BSND;
         bool pagedShapeFlag = true;
     };
 
@@ -294,7 +294,7 @@ namespace optiling{
         for (int32_t batchIdx = 0; batchIdx < faInfo_.batch; ++batchIdx) {
             uint32_t qLen = static_cast<uint32_t>(faInfo_.qSeqlenList[batchIdx]);
             uint32_t kvLen = static_cast<uint32_t>(faInfo_.kvSeqlenList[batchIdx]);
-            if (faInfo_.isTnd) {
+            if (faInfo_.layout == FwdLayout::TND) {
                 qLen = static_cast<uint32_t>(faInfo_.qSeqlenList[batchIdx + 1] -
                     faInfo_.qSeqlenList[batchIdx]);
                 if (!faInfo_.pagedCacheFlag) {
@@ -466,7 +466,7 @@ namespace optiling{
         for (int32_t batchIdx = 0; batchIdx < faInfo_.batch; batchIdx++) {
             uint32_t qSeqlen = *(faInfo_.qSeqlenList + batchIdx);
             uint32_t kvSeqlen = *(faInfo_.kvSeqlenList + batchIdx);
-            if (faInfo_.isTnd) {
+            if (faInfo_.layout == FwdLayout::TND) {
                 uint64_t prevQSeqlenSum = *(faInfo_.qSeqlenList + batchIdx);
                 qSeqlen = *(faInfo_.qSeqlenList + batchIdx + 1) - prevQSeqlenSum;
                 if (!faInfo_.pagedCacheFlag) {

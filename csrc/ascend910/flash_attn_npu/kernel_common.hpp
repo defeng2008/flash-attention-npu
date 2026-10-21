@@ -57,7 +57,8 @@ namespace KernelCommon {
 
         enum class inputLayout : uint32_t {
             BSND = 0,
-            TND = 1
+            TND = 1,
+            BNSD = 2
         };
     };
 
@@ -76,15 +77,17 @@ namespace KernelCommon {
         GM_ADDR alibiSlopes;
         GM_ADDR kNew;
         GM_ADDR vNew;
+        int64_t kvSeqlenAllocated;
 
         __aicore__ inline FAIKernelParams() {}
 
         __aicore__ inline FAIKernelParams(GM_ADDR q_, GM_ADDR k_, GM_ADDR v_, GM_ADDR mask_, GM_ADDR blockTables_,
                 GM_ADDR actualQseqlen_, GM_ADDR actualKvseqlen_, GM_ADDR o_, GM_ADDR lse_, GM_ADDR workSpace_,
-                    GM_ADDR tiling_, GM_ADDR alibiSlopes_, GM_ADDR kNew_ = nullptr, GM_ADDR vNew_ = nullptr)
+                    GM_ADDR tiling_, GM_ADDR alibiSlopes_, GM_ADDR kNew_ = nullptr, GM_ADDR vNew_ = nullptr,
+                    int64_t kvSeqlenAllocated_ = 0)
             : q(q_), k(k_), v(v_), mask(mask_), blockTables(blockTables_), actualQseqlen(actualQseqlen_),
                 actualKvseqlen(actualKvseqlen_), o(o_), lse(lse_), workSpace(workSpace_), tiling(tiling_), alibiSlopes(alibiSlopes_),
-                kNew(kNew_), vNew(vNew_) {}
+                kNew(kNew_), vNew(vNew_), kvSeqlenAllocated(kvSeqlenAllocated_) {}
     };
 
     __aicore__ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)

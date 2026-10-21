@@ -15,12 +15,13 @@ from typing import List, Optional
 # switch() inside the impl (bwd_dispatch_common.hpp). So head_dim is deliberately
 # dropped here.
 #
-# The real compile-time axes are dtype and input layout (TND / BSND). Each
-# generated .cpp holds exactly ONE explicit instantiation of the per-family
-# dispatch template, so the heavy kernel templates land in separate,
-# parallel-compiled translation units. The impl bodies live in the shared
-# fwd_dispatch_impl.hpp / bwd_dispatch_common.hpp headers (one directory up);
-# this script only emits the instantiation stubs.
+# The real compile-time axes are dtype and input layout. The forward supports
+# the three input layouts (TND / BSND / BNSD); the backward only two (TND /
+# BSND — BNSD never enters the backward). Each generated .cpp holds exactly ONE
+# explicit instantiation of the per-family dispatch template, so the heavy
+# kernel templates land in separate, parallel-compiled translation units. The
+# impl bodies live in the shared fwd_dispatch_impl.hpp / bwd_dispatch_common.hpp
+# headers (one directory up); this script only emits the instantiation stubs.
 
 # dtype key -> C++ type token
 DTYPE_MAP = {
@@ -28,10 +29,19 @@ DTYPE_MAP = {
     "bf16": "bfloat16_t",
 }
 
-# layout key -> (display name, fwd IS_TND bool token, bwd layout constant token)
-LAYOUTS = [
-    ("bsnd", "BSND", "false", "BSND"),
-    ("tnd",  "TND",  "true",  "TND"),
+# Forward layout key -> (display name, FaiKenel::inputLayout token).
+FWD_LAYOUTS = [
+    ("bsnd", "BSND", "FaiKenel::inputLayout::BSND"),
+    ("tnd",  "TND",  "FaiKenel::inputLayout::TND"),
+    ("bnsd", "BNSD", "FaiKenel::inputLayout::BNSD"),
+]
+
+# Backward layout key -> (display name, FAG layout constant token). The backward
+# uses the FAG-side BSND/TND constants (see fag_kernel_common.hpp), not the
+# kernel inputLayout enum.
+BWD_LAYOUTS = [
+    ("bsnd", "BSND", "BSND"),
+    ("tnd",  "TND",  "TND"),
 ]
 
 PRELUDE = (
@@ -54,11 +64,11 @@ def _header(family_desc: str, layout_display: str) -> str:
 
 def fwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     ctype = DTYPE_MAP[dtype_key]
-    layout_key, display, is_tnd, _ = layout
+    layout_key, display, layout_token = layout
     body = (
         _header("forward FAInfer dispatch", display)
         + '#include "../fwd_dispatch_impl.hpp"\n\n'
-        + f"template void launch_fwd_dtype<{ctype}, {is_tnd}>(const FwdLaunchArgs &);"
+        + f"template void launch_fwd_dtype<{ctype}, {layout_token}>(const FwdLaunchArgs &);"
         f"  // {display}\n"
     )
     return Kernel(
@@ -72,7 +82,7 @@ def fwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
 
 def bwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     ctype = DTYPE_MAP[dtype_key]
-    layout_key, display, _, enum = layout
+    layout_key, display, enum = layout
     body = (
         _header("backward FAGGeneral dispatch", display)
         + '#include "../bwd_dispatch_common.hpp"\n\n'
@@ -100,8 +110,9 @@ class Kernel:
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
-        for layout in LAYOUTS:
+        for layout in FWD_LAYOUTS:
             kernels.append(fwd_kernel(dtype, layout))
+        for layout in BWD_LAYOUTS:
             kernels.append(bwd_kernel(dtype, layout))
     return kernels
 

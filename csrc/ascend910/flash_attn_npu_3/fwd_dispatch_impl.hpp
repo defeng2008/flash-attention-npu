@@ -25,7 +25,8 @@
     SplitFuse::FAInfer<DTYPE, DTYPE, float, PAGED, MASK_TYPE, LAYOUT_TYPE, Catlass::Epilogue::LseModeT::OUT_ONLY,      \
                        SOFTCAP><<<launchBlockDim, nullptr, aclStream>>>(                                               \
         fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice,      \
-        kvSeqDevice, workspaceDevice, tiling, kNewDevice, vNewDevice, sequsedQDevice, sequsedKVDevice)
+        kvSeqDevice, workspaceDevice, tiling, kNewDevice, vNewDevice, sequsedQDevice, sequsedKVDevice,                 \
+        kvSeqlenAllocated)
 
 // BOOL_SWITCH-style helper (idea from static_switch.h in flash-attention): each
 // branch fixes the runtime bool as a named constexpr flag, so the dispatch
@@ -61,10 +62,10 @@
         }                                                                                                              \
     } while (0)
 
-template <typename DType, bool IS_TND>
+template <typename DType, FaiKenel::inputLayout kLayout>
 void launch_fwd_dtype(const FwdLaunchArgs& a)
 {
-    constexpr auto LAYOUT = IS_TND ? FaiKenel::inputLayout::TND : FaiKenel::inputLayout::BSND;
+    constexpr auto LAYOUT = kLayout;
 
     const uint32_t launchBlockDim = a.launchBlockDim;
     const aclrtStream aclStream = a.aclStream;
@@ -89,6 +90,7 @@ void launch_fwd_dtype(const FwdLaunchArgs& a)
     const FAInferTilingParams tiling = a.tiling;
     uint8_t* sequsedQDevice = a.sequsedQDevice;
     uint8_t* sequsedKVDevice = a.sequsedKVDevice;
+    const int64_t kvSeqlenAllocated = a.kv_seqlen_allocated;
     (void)flashDecodeFlag;
 
     FWD_BOOL_SWITCH(paged_KV, IsPaged, {

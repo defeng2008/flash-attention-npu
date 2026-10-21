@@ -35,7 +35,8 @@ public:
                     uint32_t qNBlockSize,
                     uint32_t lseHeadStride,
                     uint32_t embedV,
-                    uint32_t outputStride)
+                    uint32_t outputStride,
+                    uint32_t oHeadStride)
     {
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
@@ -73,7 +74,7 @@ public:
         } else {
             for (uint32_t qNIdx = 0U; qNIdx < qNThisSubBlock; ++qNIdx) {
                 AscendC::DataCopyPad(
-                    gOutput[(qNStart + qNIdx) * embedV], outputUbTensor[qNIdx * qSBlockSize * embedRound],
+                    gOutput[(qNStart + qNIdx) * oHeadStride], outputUbTensor[qNIdx * qSBlockSize * embedRound],
                     AscendC::DataCopyExtParams(qSBlockSize, embedV * sizeof(ElementO), 0,
                         (outputStride - embedV) * sizeof(ElementO), 0));
             }
