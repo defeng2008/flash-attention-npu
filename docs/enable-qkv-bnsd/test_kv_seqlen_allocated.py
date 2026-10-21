@@ -21,9 +21,9 @@ Two cases, one per layout:
   ``S_alloc`` must be rejected before launch.
 
 Run:
-    PYTHONPATH=$(pwd) python -m pytest docs/enable-950-qkv-bnsd/test_kv_seqlen_allocated.py -q
+    PYTHONPATH=$(pwd) python -m pytest docs/enable-qkv-bnsd/test_kv_seqlen_allocated.py -q
 or standalone:
-    PYTHONPATH=$(pwd) python docs/enable-950-qkv-bnsd/test_kv_seqlen_allocated.py
+    PYTHONPATH=$(pwd) python docs/enable-qkv-bnsd/test_kv_seqlen_allocated.py
 """
 
 import math
