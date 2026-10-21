@@ -56,7 +56,8 @@ public:
         AscendC::GlobalTensor<ElementLseOut> gLse,
         const LayoutAttnOut &layoutOutput,
         const LayoutLseOut &layoutLse,
-        uint32_t qSThisSubBlock, uint32_t qNThisSubBlock)
+        uint32_t qSThisSubBlock, uint32_t qNThisSubBlock,
+        uint32_t outputStride, uint32_t oHeadStride)
     {
         uint32_t oHiddenSize = layoutOutput.shape(1);
         uint32_t qHeads = layoutLse.shape(0);
@@ -70,11 +71,11 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         for (uint32_t qNIdx = 0; qNIdx < qNThisSubBlock; qNIdx++) {
             AscendC::DataCopyPad(
-                gOutput[qNIdx * embedV],
+                gOutput[qNIdx * oHeadStride],
                 attnOutUbTensor,
                 AscendC::DataCopyExtParams(
                     qSThisSubBlock, embedV * sizeof(ElementAttnOut),
-                    0, (oHiddenSize - embedV) * sizeof(ElementAttnOut), 0));
+                    0, (outputStride - embedV) * sizeof(ElementAttnOut), 0));
         }
         if constexpr (LSE_MODE_ == LseModeT::OUT_ONLY) {
             // init lseOut with inf
@@ -93,12 +94,10 @@ public:
         AscendC::GlobalTensor<ElementLseOut> gLse,
         const LayoutAttnOut &layoutOutput,
         const LayoutLseOut &layoutLse,
-        uint32_t qSBlockSize, uint32_t qNBlockSize)
+        uint32_t qSBlockSize, uint32_t qNBlockSize,
+        uint32_t outputStride, uint32_t oHeadStride)
     {
         uint32_t rowNum = qSBlockSize * qNBlockSize;
-        uint32_t oHiddenSize = layoutOutput.shape(1);
-        uint32_t qHeads = layoutLse.shape(0);
-        uint32_t embedV = oHiddenSize / qHeads;
 
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
@@ -111,10 +110,13 @@ public:
         uint32_t rowActualSubBlock = (subBlockIdx == 1U) ? (rowNum - rowSplitSubBlock) : rowSplitSubBlock;
         uint32_t rowOffsetSubBlock = subBlockIdx * rowSplitSubBlock;
         uint32_t outRowOffsetSubBlock = (qNBlockSize == 1U) ? rowOffsetSubBlock : 0;
-        uint32_t outColOffsetSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock * embedV;
+        uint32_t outHeadOffsetSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock;
         uint32_t qSThisSubBlock = (qNBlockSize == 1U) ? rowActualSubBlock : qSBlockSize;
+        // Rows step by the token stride, heads by the per-head plane pitch (BSND:
+        // qHeads*embedV / embedV; BNSD: embedV / S_alloc*embedV).
         int64_t outOffsetSubBlock =
-            layoutOutput.GetOffset(MatrixCoord(outRowOffsetSubBlock, outColOffsetSubBlock));
+            static_cast<int64_t>(outRowOffsetSubBlock) * outputStride +
+            static_cast<int64_t>(outHeadOffsetSubBlock) * oHeadStride;
         auto gOutputSubBlock = gOutput[outOffsetSubBlock];
         auto layoutOutputSubBlock = layoutOutput;
 
@@ -131,7 +133,8 @@ public:
             SubCoreCompute(
                 gOutputSubBlock, gLseThisSubBlock,
                 layoutOutputSubBlock, layoutLseThisSubBlock,
-                qSThisSubBlock, qNThisSubBlock);
+                qSThisSubBlock, qNThisSubBlock,
+                outputStride, oHeadStride);
         }
     }
 private:

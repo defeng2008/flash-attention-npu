@@ -121,28 +121,35 @@ public:
         }
     }
 
+    // qHeadStride: GM distance (in elements) between adjacent Q head planes
+    //   (BSND/TND: embed, BNSD: maxQSeqlen * embed) -- the row stride of the
+    //   per-token (heads x embed) source block.
+    // qTokenStride: GM distance between adjacent Q tokens within a head plane
+    //   (BSND/TND: qHeads * embed, BNSD: embed) -- the ND matrix stride; the
+    //   ND matrices of the copy are the tokens.
     __aicore__ inline
     void loadQGM(
         AscendC::GlobalTensor<ElementA> gA,
         LayoutA layoutA,
-        uint32_t rowNum, uint32_t &singleGroupHeads, uint32_t &qHeads)
+        uint32_t rowNum, uint32_t &singleGroupHeads,
+        int64_t qHeadStride, uint32_t qTokenStride)
     {
         uint32_t embed = layoutA.shape(1);
         uint32_t rowNumRound = RoundUp(rowNum, L1AAlignHelper::M_ALIGNED);
         uint32_t tokenNumPerGroup = rowNum / singleGroupHeads;
-        auto layoutSingleANd = layoutA.GetTileLayout(MakeCoord(singleGroupHeads, embed));
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
         if (singleGroupHeads == 1U) {
-            LayoutA denseSrc(rowNum, embed, qHeads * embed);
+            LayoutA denseSrc(rowNum, embed, static_cast<int64_t>(qTokenStride));
             copyGmToL1A(
                 l1ATensor, gA,
                 layoutAInL1, denseSrc);
         } else {
+            LayoutA layoutSingleANd(singleGroupHeads, embed, qHeadStride);
             copyGmToL1A(
                 l1ATensor, gA,
                 layoutAInL1, layoutSingleANd,
-                tokenNumPerGroup, qHeads * embed, tokenNumPerGroup, BLOCK_SIZE, rowNumRound);
+                tokenNumPerGroup, qTokenStride, tokenNumPerGroup, BLOCK_SIZE, rowNumRound);
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);

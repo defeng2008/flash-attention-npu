@@ -9,4 +9,4 @@
 
 #include "../fwd_dispatch_impl.hpp"
 
-template void launch_fwd_impl<bfloat16_t, false>(const FwdLaunchArgs &);  // BSND
+template void launch_fwd_impl<bfloat16_t, KernelCommon::FaiKenel::inputLayout::BSND>(const FwdLaunchArgs &);  // BSND

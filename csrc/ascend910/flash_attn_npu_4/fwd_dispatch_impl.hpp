@@ -26,7 +26,7 @@
                        SOFTCAP><<<launchBlockDim, nullptr, aclStream>>>(                                               \
         fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice,      \
         kvSeqDevice, workspaceDevice, tilingDevice, runtimeDevice, a.blockTableStride, sequsedQDevice,                 \
-        sequsedKVDevice)
+        sequsedKVDevice, kvSeqlenAllocated)
 
 #define FWD_BOOL_SWITCH(COND, CONST_NAME, ...)                                                                         \
     do {                                                                                                               \
@@ -53,14 +53,15 @@
         }                                                                                                              \
     } while (0)
 
-template <typename DType, bool IS_TND>
+template <typename DType, FaiKenel::inputLayout kLayout>
 void launch_fwd_dtype(const FwdLaunchArgs& a)
 {
-    constexpr auto LAYOUT = IS_TND ? FaiKenel::inputLayout::TND : FaiKenel::inputLayout::BSND;
+    constexpr auto LAYOUT = kLayout;
 
     const uint32_t launchBlockDim = a.launchBlockDim;
     const aclrtStream aclStream = a.aclStream;
     const uint64_t fftsAddr = a.fftsAddr;
+    const int64_t kvSeqlenAllocated = a.kv_seqlen_allocated;
     const bool paged_KV = a.paged_KV;
     const bool is_causal = a.is_causal;
     const bool is_local = a.is_local;

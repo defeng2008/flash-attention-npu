@@ -56,11 +56,14 @@ public:
         AscendC::GlobalTensor<ElementLseOut> gLse,
         const LayoutAttnOut &layoutOutput,
         const LayoutLseOut &layoutLse,
-        uint32_t qSThisSubBlock, uint32_t qNThisSubBlock)
+        uint32_t qSThisSubBlock, uint32_t qNThisSubBlock,
+        uint32_t embedV, uint32_t oHeadStride)
     {
+        // layoutOutput.shape(1) is the output row pitch (oHiddenSize): qHeads *
+        // embedV for BSND, embedV for BNSD. embedV itself cannot be recovered
+        // from it under BNSD, so it is passed in explicitly; the per-head target
+        // step is oHeadStride (embedV for BSND, maxQSeqlen * embedV for BNSD).
         uint32_t oHiddenSize = layoutOutput.shape(1);
-        uint32_t qHeads = layoutLse.shape(0);
-        uint32_t embedV = oHiddenSize / qHeads;
         uint32_t embedRoundV = RoundUp(embedV, HALF_ELEM_NUM_PER_BLK);
         AscendC::PipeBarrier<PIPE_ALL>();
         // init attnOut with 0
@@ -70,7 +73,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         for (uint32_t qNIdx = 0; qNIdx < qNThisSubBlock; qNIdx++) {
             AscendC::DataCopyPad(
-                gOutput[qNIdx * embedV],
+                gOutput[qNIdx * oHeadStride],
                 attnOutUbTensor,
                 AscendC::DataCopyExtParams(
                     qSThisSubBlock, embedV * sizeof(ElementAttnOut),
@@ -96,12 +99,10 @@ public:
         AscendC::GlobalTensor<ElementLseOut> gLse,
         const LayoutAttnOut &layoutOutput,
         const LayoutLseOut &layoutLse,
-        uint32_t qSBlockSize, uint32_t qNBlockSize)
+        uint32_t qSBlockSize, uint32_t qNBlockSize,
+        uint32_t embedV, uint32_t oHeadStride)
     {
         uint32_t rowNum = qSBlockSize * qNBlockSize;
-        uint32_t oHiddenSize = layoutOutput.shape(1);
-        uint32_t qHeads = layoutLse.shape(0);
-        uint32_t embedV = oHiddenSize / qHeads;
 
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
@@ -114,7 +115,7 @@ public:
         uint32_t rowActualSubBlock = (subBlockIdx == 1U) ? (rowNum - rowSplitSubBlock) : rowSplitSubBlock;
         uint32_t rowOffsetSubBlock = subBlockIdx * rowSplitSubBlock;
         uint32_t outRowOffsetSubBlock = (qNBlockSize == 1U) ? rowOffsetSubBlock : 0;
-        uint32_t outColOffsetSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock * embedV;
+        uint32_t outColOffsetSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock * oHeadStride;
         uint32_t qSThisSubBlock = (qNBlockSize == 1U) ? rowActualSubBlock : qSBlockSize;
         int64_t outOffsetSubBlock =
             layoutOutput.GetOffset(MatrixCoord(outRowOffsetSubBlock, outColOffsetSubBlock));
@@ -134,7 +135,7 @@ public:
             SubCoreCompute(
                 gOutputSubBlock, gLseThisSubBlock,
                 layoutOutputSubBlock, layoutLseThisSubBlock,
-                qSThisSubBlock, qNThisSubBlock);
+                qSThisSubBlock, qNThisSubBlock, embedV, oHeadStride);
         }
     }
 private:

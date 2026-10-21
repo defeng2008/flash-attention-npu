@@ -40,6 +40,46 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+_LAYOUT_TND = 0
+_LAYOUT_BSND = 1
+_LAYOUT_BNSD = 2
+
+
+def _transposed_bnsd_view(t):
+    """``t.transpose(1, 2)`` if ``t`` is a contiguous BNSD tensor seen as BSND, else ``None``."""
+    if t is None or t.dim() != 4 or t.is_contiguous():
+        return None
+    _, n1, _, n3 = t.shape
+    if t.stride(3) == 1 and t.stride(1) == n3 and t.stride(2) == n1 * n3:
+        return t.transpose(1, 2)
+    return None
+
+
+def _detect_layout(q, k, v, page_table, cu_seqlens_k):
+    """Return ``(layout, q, k, v, out_transposed)``: the layout code shared with the C++
+    host, the operands to hand the kernel, and whether ``out`` must be transposed back to
+    match the shape of the query the caller passed in.
+
+    Only a stride match selects BNSD; otherwise rank-4 operands are read as BSND. Paged and
+    cu-packed (TND) Q/K/V are never BNSD.
+    """
+    if k is not None and v is not None and v.dim() != k.dim():
+        raise RuntimeError(
+            "flash_attn_npu_4: key and value must have the same rank for layout detection"
+        )
+
+    if q.dim() != 4 or k.dim() != 4 or page_table is not None or cu_seqlens_k is not None:
+        return _LAYOUT_BSND, q, k, v, False
+
+    q_bnsd = _transposed_bnsd_view(q)
+    k_bnsd = _transposed_bnsd_view(k)
+    v_bnsd = _transposed_bnsd_view(v)
+    if q_bnsd is not None and k_bnsd is not None and v_bnsd is not None:
+        return _LAYOUT_BNSD, q_bnsd, k_bnsd, v_bnsd, True
+
+    return _LAYOUT_BSND, q, k, v, False
+
+
 def round_multiple(x, m):
     return (x + m - 1) // m * m
 
@@ -119,6 +159,7 @@ def _flash_attn_forward(
     learnable_sink: Optional[torch.Tensor] = None,
     scheduler_metadata: Optional[torch.Tensor] = None,
     sm_margin: int = 0,
+    layout: int = _LAYOUT_BSND,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     q, k = [maybe_contiguous(x) for x in (q, k)]
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
@@ -150,6 +191,7 @@ def _flash_attn_forward(
         learnable_sink,
         scheduler_metadata,
         sm_margin,
+        layout,
     )
     return out, softmax_lse
 
@@ -358,6 +400,7 @@ def _flash_attn_forward_fake(
     learnable_sink: Optional[torch.Tensor] = None,
     scheduler_metadata: Optional[torch.Tensor] = None,
     sm_margin: int = 0,
+    layout: int = _LAYOUT_BSND,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Metadata-only fake for V4 A2 forward. Returns (out, lse)."""
     if out_ is not None:
@@ -375,10 +418,15 @@ def _flash_attn_forward_fake(
         total_q = q.shape[0]
         softmax_lse = torch.empty((num_heads, total_q), dtype=torch.float32, device=q.device)
     else:
-        # (batch_size, num_heads, seqlen_q)
-        batch_size = q.shape[0]
-        seqlen_q = q.shape[1]
-        num_heads = q.shape[2]
+        # (batch_size, num_heads, seqlen_q); q is (B, H, S, D) in BNSD.
+        if layout == _LAYOUT_BNSD:
+            batch_size = q.shape[0]
+            num_heads = q.shape[1]
+            seqlen_q = q.shape[2]
+        else:
+            batch_size = q.shape[0]
+            seqlen_q = q.shape[1]
+            num_heads = q.shape[2]
         softmax_lse = torch.empty(
             (batch_size, num_heads, seqlen_q), dtype=torch.float32, device=q.device
         )
@@ -634,6 +682,10 @@ class FlashAttnFunc(torch.autograd.Function):
         seqlen_k = k.shape[1]
         num_heads_k = k.shape[2]
         head_size_v = v.shape[-1]
+        # get_scheduler_metadata only takes numbers and reads them as BSND, so the
+        # sizes above come from the pre-detection shapes; BNSD only re-views the
+        # same storage.
+        layout, q, k, v, out_transposed = _detect_layout(q, k, v, None, None)
         seqused_k = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
         scheduler_metadata = get_scheduler_metadata(
             max_seqlen_q=seqlen_q,
@@ -675,6 +727,7 @@ class FlashAttnFunc(torch.autograd.Function):
             learnable_sink=learnable_sink,
             scheduler_metadata=scheduler_metadata,
             sm_margin=0,
+            layout=layout,
         )
 
         ctx.save_for_backward(q, k, v, out, softmax_lse)
@@ -695,10 +748,19 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.aux_tensors = aux_tensors
         ctx.aux_scalars = aux_scalars
         ctx.head_size_og = q.size(-1)
+        ctx.layout = layout
+        if out_transposed:
+            # Report the result in the shape the caller passed in, not the BNSD view.
+            out = out.transpose(1, 2)
         return (out, softmax_lse) if return_lse else out
 
     @staticmethod
     def backward(ctx, dout, *args):
+        if ctx.layout == _LAYOUT_BNSD:
+            raise NotImplementedError(
+                "flash_attn_npu_4: 910 backend BNSD layout is forward-only; "
+                "the backward pass is not implemented"
+            )
         q, k, v, out, softmax_lse = ctx.saved_tensors
         # torch_npu may pass a zero tensor (not None) for unused LSE grads.
         dlse = args[0] if ctx.return_lse and len(args) > 0 else None
@@ -811,6 +873,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         assert v.stride(-1) == 1, "v_cache must have contiguous last dimension"
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
+        # cu_seqlens_q packs the query (TND); otherwise the rank-4 data is BSND.
+        layout = _LAYOUT_TND if cu_seqlens_q is not None else _LAYOUT_BSND
         if seqused_k is not None and isinstance(seqused_k, int):
             seqused_k = torch.full((q.shape[0],), seqused_k, dtype=torch.int32, device=k.device)
             seqused_k = maybe_contiguous(seqused_k)
@@ -883,6 +947,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             learnable_sink=learnable_sink,
             scheduler_metadata=scheduler_metadata,
             sm_margin=0,
+            layout=layout,
         )
 
         ctx.save_for_backward(
@@ -908,6 +973,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.aux_tensors = aux_tensors
         ctx.aux_scalars = aux_scalars
         ctx.head_size_og = q.size(-1)
+        ctx.layout = layout
 
         # Do not materialize unused output gradients as zero tensors.
         # V4 backward does not support dlse; unused LSE gradients
@@ -922,6 +988,11 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
+        if ctx.layout == _LAYOUT_BNSD:
+            raise NotImplementedError(
+                "flash_attn_npu_4: 910 backend BNSD layout is forward-only; "
+                "the backward pass is not implemented"
+            )
         q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = (
             ctx.saved_tensors
         )

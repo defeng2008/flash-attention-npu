@@ -6,15 +6,14 @@
 #pragma once
 
 //
-// Light half of the v2 forward (FAInfer) dispatch: selects one of the 32
+// Light half of the v2 forward (FAInfer) dispatch: selects one of the 48
 // generated autogen/fwd_combo_<dtype>_<layout>[_softcap][_retsoftmax]
 // [_dropout] combo functions. Each combo TU (heavy, via
 // fwd_kernel_launch.hpp) fixes one (softcap, return_softmax, dropout) triple
 // and instantiates the 6 paged x mask FAInfer variants, so the 48
 // instantiations of a (dtype, layout) family compile in 8 parallel TUs
-// instead of one. This header stays lightweight (no CATLASS / kernel
-// includes) so the autogen stubs and host TUs never drag in the kernel
-// templates.
+// instead of one. This header stays lightweight (no CATLASS includes) so the
+// autogen stubs and host TUs never drag in the kernel templates.
 //
 
 #include "fwd_dispatch.hpp"
@@ -28,17 +27,21 @@
 
 #include "autogen/fwd_combo_decls.hpp"
 
-template <typename DType, bool IS_TND>
+template <typename DType, KernelCommon::FaiKenel::inputLayout kLayout>
 void launch_fwd_impl(const FwdLaunchArgs &a) {
     if constexpr (std::is_same_v<DType, half>) {
-        if constexpr (IS_TND) {
+        if constexpr (kLayout == KernelCommon::FaiKenel::inputLayout::TND) {
             FWD_SELECT_COMBO_8(fp16, tnd);
+        } else if constexpr (kLayout == KernelCommon::FaiKenel::inputLayout::BNSD) {
+            FWD_SELECT_COMBO_8(fp16, bnsd);
         } else {
             FWD_SELECT_COMBO_8(fp16, bsnd);
         }
     } else {
-        if constexpr (IS_TND) {
+        if constexpr (kLayout == KernelCommon::FaiKenel::inputLayout::TND) {
             FWD_SELECT_COMBO_8(bf16, tnd);
+        } else if constexpr (kLayout == KernelCommon::FaiKenel::inputLayout::BNSD) {
+            FWD_SELECT_COMBO_8(bf16, bnsd);
         } else {
             FWD_SELECT_COMBO_8(bf16, bsnd);
         }

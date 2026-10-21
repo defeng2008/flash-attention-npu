@@ -16,6 +16,46 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+_LAYOUT_TND = 0
+_LAYOUT_BSND = 1
+_LAYOUT_BNSD = 2
+
+
+def _transposed_bnsd_view(t):
+    """``t.transpose(1, 2)`` if ``t`` is a contiguous BNSD tensor seen as BSND, else ``None``."""
+    if t is None or t.dim() != 4 or t.is_contiguous():
+        return None
+    _, n1, _, n3 = t.shape
+    if t.stride(3) == 1 and t.stride(1) == n3 and t.stride(2) == n1 * n3:
+        return t.transpose(1, 2)
+    return None
+
+
+def _detect_layout(q, k, v, page_table, cu_seqlens_k):
+    """Return ``(layout, q, k, v, out_transposed)``: the layout code shared with the C++
+    host, the operands to hand the kernel, and whether ``out`` must be transposed back to
+    match the shape of the query the caller passed in.
+
+    Only a stride match selects BNSD; otherwise rank-4 operands are read as BSND. Paged and
+    cu-packed (TND) Q/K/V are never BNSD.
+    """
+    if k is not None and v is not None and v.dim() != k.dim():
+        raise RuntimeError(
+            "flash_attn_npu: key and value must have the same rank for layout detection"
+        )
+
+    if q.dim() != 4 or k.dim() != 4 or page_table is not None or cu_seqlens_k is not None:
+        return _LAYOUT_BSND, q, k, v, False
+
+    q_bnsd = _transposed_bnsd_view(q)
+    k_bnsd = _transposed_bnsd_view(k)
+    v_bnsd = _transposed_bnsd_view(v)
+    if q_bnsd is not None and k_bnsd is not None and v_bnsd is not None:
+        return _LAYOUT_BNSD, q_bnsd, k_bnsd, v_bnsd, True
+
+    return _LAYOUT_BSND, q, k, v, False
+
+
 def round_multiple(x, m):
     return (x + m - 1) // m * m
 
@@ -106,6 +146,7 @@ def _flash_attn_forward(
     alibi_slopes: Optional[torch.Tensor],
     return_softmax: bool,
     scheduler_metadata: Optional[torch.Tensor] = None,
+    layout: int = _LAYOUT_BSND,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_npu.fwd(
@@ -123,6 +164,7 @@ def _flash_attn_forward(
         return_softmax,
         None,
         scheduler_metadata,
+        layout,
     )
     return out, softmax_lse, S_dmask, rng_state
 
@@ -141,10 +183,14 @@ def _flash_attn_forward_fake(
     alibi_slopes: Optional[torch.Tensor],
     return_softmax: bool,
     scheduler_metadata: Optional[torch.Tensor] = None,
+    layout: int = _LAYOUT_BSND,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    batch_size, seqlen_q, num_heads, head_size = q.shape
-    seqlen_k = k.shape[1]
+    if layout == _LAYOUT_BNSD:
+        batch_size, num_heads, seqlen_q, head_size = q.shape
+    else:
+        batch_size, seqlen_q, num_heads, head_size = q.shape
+    seqlen_k = k.shape[-2] if layout == _LAYOUT_BNSD else k.shape[1]
     out = torch.empty_like(q)
     softmax_lse = torch.empty(
         (batch_size, num_heads, seqlen_q), dtype=torch.float32, device=q.device, layout=q.layout
@@ -886,15 +932,23 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         head_size_og = q.size(3)
+        # Training interfaces do not expose scheduler_metadata (aligned with
+        # official flash-attn); the scheduler metadata is computed internally on
+        # the AICPU so no D2H/H2D sync breaks the pipeline.
+        # Detect the layout first, then pad the head dim: get_scheduler_metadata must
+        # receive the head dim the kernel actually runs on (padded), and the per-layout
+        # sizes must be read from the operand the kernel receives.
+        layout, q, k, v, out_transposed = _detect_layout(q, k, v, None, None)
         if head_size_og % 8 != 0:
             q = torch.nn.functional.pad(q, [0, 8 - head_size_og % 8])
             k = torch.nn.functional.pad(k, [0, 8 - head_size_og % 8])
             v = torch.nn.functional.pad(v, [0, 8 - head_size_og % 8])
-        # Training interfaces do not expose scheduler_metadata (aligned with
-        # official flash-attn); the scheduler metadata is computed internally on
-        # the AICPU so no D2H/H2D sync breaks the pipeline.
-        batch_size, seqlen_q, num_heads, head_size = q.shape
-        seqlen_k, num_heads_k = k.shape[1], k.shape[2]
+        if layout == _LAYOUT_BNSD:
+            batch_size, num_heads, seqlen_q, head_size = q.shape
+            seqlen_k, num_heads_k = k.shape[2], k.shape[1]
+        else:
+            batch_size, seqlen_q, num_heads, head_size = q.shape
+            seqlen_k, num_heads_k = k.shape[1], k.shape[2]
         cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
         if alibi_slopes is None:
             alibi_slopes_batch_stride = 0
@@ -928,6 +982,7 @@ class FlashAttnFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             scheduler_metadata=scheduler_metadata,
+            layout=layout,
         )
         if is_grad:
             ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
@@ -939,11 +994,19 @@ class FlashAttnFunc(torch.autograd.Function):
             ctx.alibi_slopes = alibi_slopes
             ctx.deterministic = deterministic
             ctx.head_size_og = head_size_og
+            ctx.layout = layout
         out = out_padded[..., :head_size_og]
+        if out_transposed:
+            # Report the result in the shape the caller passed in, not the BNSD view.
+            out = out.transpose(1, 2)
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
     def backward(ctx, dout, *args):
+        if ctx.layout == _LAYOUT_BNSD:
+            raise NotImplementedError(
+                "flash_attn_npu: 910 后端 BNSD 仅支持前向，反向未实现"
+            )
         q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
         dout, q, k, v, out, head_size_og = _pad_bwd_headdim(dout, q, k, v, out, ctx.head_size_og)
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
@@ -1741,6 +1804,24 @@ def flash_attn_with_kvcache(
             k_cache=k_cache,
             alibi_slopes=alibi_slopes,
         )
+    # _detect_layout picks BNSD only from matching strides; paged KV is never BNSD.
+    bsnd_seqlen_k = k_cache.shape[1]
+    layout, q, k_cache, v_cache, out_transposed = _detect_layout(
+        q, k_cache, v_cache, block_table, None
+    )
+    if out_transposed:
+        if k is not None or v is not None:
+            raise NotImplementedError(
+                "flash_attn_npu: 910 后端 BNSD 布局不支持 append-KV (k/v)"
+            )
+        if cache_seqlens is not None:
+            max_seqlen_k_bound = int(cache_seqlens.max().item())
+            if max_seqlen_k_bound > bsnd_seqlen_k:
+                raise ValueError(
+                    "flash_attn_npu: BNSD KV 序列维 "
+                    f"({bsnd_seqlen_k}) 太小，无法覆盖实际 KV 长度 "
+                    f"({max_seqlen_k_bound})"
+                )
     out, softmax_lse = flash_attn_npu.fwd_kvcache(
         q,
         k_cache,
@@ -1763,7 +1844,11 @@ def flash_attn_with_kvcache(
         rotary_interleaved,
         num_splits,
         scheduler_metadata,
+        layout,
     )
+    if out_transposed:
+        # Report the result in the shape the caller passed in, not the BNSD view.
+        out = out.transpose(1, 2)
     return (out, softmax_lse) if return_softmax_lse else out
 
 
