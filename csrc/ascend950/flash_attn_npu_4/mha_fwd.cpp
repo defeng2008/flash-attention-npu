@@ -353,7 +353,9 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     // guard against a metadata schedule that was disabled by AICPU.
     const int64_t metadataKvBound =
         max_seqlen_k_.value_or(paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
-                                        : (k.dim() == 4 ? k.size(1) : k.size(0)));
+                                        : (layout_enum == FwdLayout::BNSD
+                                               ? k.size(2)
+                                               : (k.dim() == 4 ? k.size(1) : k.size(0))));
     const uint32_t metadataGroupSize = num_heads_k == 0 ? 1U : static_cast<uint32_t>(num_heads / num_heads_k);
     const uint32_t metadataBaseTaskUpperBound =
         static_cast<uint32_t>(batch_size) * static_cast<uint32_t>(num_heads_k) * ((metadataGroupSize + 4U - 1U) / 4U);
