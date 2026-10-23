@@ -11,6 +11,7 @@ the pre-commit hook, local quality checks, formatter behavior, and pull-request
 checks. Build, unit-test, and NPU-test instructions are outside the scope of
 this document.
 
+
 The repository uses [`pre-commit`](https://pre-commit.com/) as its single
 quality-check orchestration layer. Local hooks and CI read the same
 [`.pre-commit-config.yaml`](.pre-commit-config.yaml), so tool versions and
