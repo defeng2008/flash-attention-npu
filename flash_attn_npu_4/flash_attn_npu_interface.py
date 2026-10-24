@@ -409,8 +409,17 @@ def _flash_attn_forward_fake(
         )
 
     is_varlen_q = cu_seqlens_q is not None
-    # Real mha_fwd uses empty_like(q) when out_ is absent.
-    out = torch.empty_like(q)
+    # Real mha_fwd allocates (B, S, H, D) for BNSD (the kernel writes contiguous BSND
+    # even though it reads BNSD) and empty_like(q) for every other layout.
+    if not is_varlen_q and layout == _LAYOUT_BNSD:
+        out = torch.empty(
+            (q.shape[0], q.shape[2], q.shape[1], q.shape[3]),
+            dtype=q.dtype,
+            device=q.device,
+            layout=q.layout,
+        )
+    else:
+        out = torch.empty_like(q)
 
     if is_varlen_q:
         # (num_heads, total_q)
@@ -749,9 +758,9 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.aux_scalars = aux_scalars
         ctx.head_size_og = q.size(-1)
         ctx.layout = layout
-        if out_transposed:
-            # Report the result in the shape the caller passed in, not the BNSD view.
-            out = out.transpose(1, 2)
+        # BNSD input yields a contiguous BSND (B, S, H, D) output directly (the host
+        # allocates it in that shape and the kernel writes it in place), so the result
+        # is reported without a transpose.
         return (out, softmax_lse) if return_lse else out
 
     @staticmethod

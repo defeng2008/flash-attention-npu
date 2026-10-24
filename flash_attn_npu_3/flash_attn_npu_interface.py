@@ -334,8 +334,11 @@ def _flash_attn_forward_fake(
     if is_varlen_q:
         out = torch.empty((total_q, num_heads, head_size_v), dtype=out_dtype, device=q.device)
     elif layout == _LAYOUT_BNSD:
+        # q is the restored contiguous BNSD (B, H, S, D) view, but the kernel writes
+        # O with BSND addressing, so out is a contiguous (B, S, H, D) block matching
+        # the caller's BSND query shape.
         out = torch.empty(
-            (batch_size, num_heads, seqlen_q, head_size_v), dtype=out_dtype, device=q.device
+            (batch_size, seqlen_q, num_heads, head_size_v), dtype=out_dtype, device=q.device
         )
     else:
         out = torch.empty(
@@ -780,9 +783,9 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.sm_margin = sm_margin
         ctx.head_size_og = q.size(-1)
         ctx.layout = layout
-        if out_transposed:
-            # Report the result in the shape the caller passed in, not the BNSD view.
-            out = out.transpose(1, 2)
+        # BNSD input now yields a contiguous BSND (B, S, H, dv) output directly — the
+        # host allocates it in that shape and the kernel writes it in place, so the
+        # result is reported without a transpose.
         return (out, softmax_lse) if return_softmax else out
 
     @staticmethod
@@ -1450,9 +1453,8 @@ def flash_attn_with_kvcache(
         sm_margin=sm_margin,
         layout=layout,
     )
-    if out_transposed:
-        # Report the result in the shape the caller passed in, not the BNSD view.
-        out = out.transpose(1, 2)
+    # BNSD input yields a contiguous BSND (B,S,H,dv) output directly (host-allocated,
+    # kernel-written in place), so no transpose is needed to report the caller's shape.
     # return (out, softmax_lse) if return_softmax_lse else out
     return (out, softmax_lse, *rest) if return_softmax_lse else out
 
