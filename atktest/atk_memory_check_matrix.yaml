@@ -1,0 +1,26 @@
+interfaces:
+  - key: func_v2
+    version: v2
+    devices: [910]
+    case_source: ../flash_attention_v2_v3_atk_delivery/accuracy/cases/all_flash_attn_func_v2.json
+    plugin_dir: ../flash_attention_v2_v3_atk_delivery/interfaces/flash_attn_func_v2
+  - key: kvcache_v2
+    version: v2
+    devices: [910]
+    case_source: ../flash_attention_v2_v3_atk_delivery/accuracy/cases/all_flash_attn_with_kvcache_v2.json
+    plugin_dir: ../flash_attention_v2_v3_atk_delivery/interfaces/flash_attn_with_kvcache_v2
+  - key: func_v3
+    version: v3
+    devices: [910, 950]
+    case_source: ../flash_attention_v2_v3_atk_delivery/accuracy/cases/all_flash_attn_func_v3.json
+    plugin_dir: ../flash_attention_v2_v3_atk_delivery/interfaces/flash_attn_func_v3
+  - key: kvcache_v3
+    version: v3
+    devices: [910, 950]
+    case_source: ../flash_attention_v2_v3_atk_delivery/accuracy/cases/all_flash_attn_with_kvcache_v3.json
+    plugin_dir: ../flash_attention_v2_v3_atk_delivery/interfaces/flash_attn_with_kvcache_v3
+  - key: func_v4
+    version: v4
+    devices: [910, 950]
+    case_source: ../flash_attention_bnsd_atk_delivery/accuracy/cases/all_flash_attn_func_v4_bnsd.json
+    plugin_dir: ../flash_attention_bnsd_atk_delivery/interfaces/flash_attn_func_v4_bnsd
