@@ -34,3 +34,12 @@ venv
 
 # compile-time generated file
 flash_attn_config.py
+
+# atktest 派生用例（由 cases/filter_cases.py 按设备从 cases/source 生成）
+atktest/memcheck/cases/910/
+atktest/memcheck/cases/950/
+# atktest 用例生成的中间产物
+atktest/memcheck/cases/gen/result/
+atktest/memcheck/cases/gen/atk_output/
+# atktest 按 --card 临时生成的节点文件
+atktest/memcheck/nodes_memory_check.card*.yaml

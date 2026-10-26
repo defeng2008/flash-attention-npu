@@ -1,0 +1,148 @@
+name: flash_attn_npu_4.flash_attn_func
+api: pytorch
+api_type: flash_attn_func_v4_bnsd_accuracy
+version: v2.1
+generate: flash_attn_func_v4_bnsd_constraints
+dtype_numbers: 100
+# Boundary/empty extras describe degenerate shapes that carry no BNSD case.
+extra_numbers: 0
+outputs: 1
+standard:
+  acc: mixed_tolerance_bm_v2
+  perf: not_key
+shape_distributions: [[0, 1.0]]
+inputs:
+  - name: q
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 65, 96, 128, 129, 256, 257]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  - name: k
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 65, 96, 128, 129, 256, 257]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  - name: v
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 65, 96, 128, 129, 256, 257]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  - name: softmax_scale
+    type: attr
+    required: false
+    dtypes:
+      values: [float]
+    ranges:
+      valid:
+        values: [0.125]
+  - name: causal
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false, true]
+  - name: qv
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 65, 96, 128, 129, 256, 257]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [default]
+  - name: window_size
+    type: attr_tuple
+    required: false
+    tuple_numbers:
+      values: [2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [-1]
+  - name: softcap
+    type: attr
+    required: false
+    dtypes:
+      values: [float]
+    ranges:
+      valid:
+        values: [0.0]
+  - name: num_splits
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [1]
+  - name: pack_gqa
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]
+  - name: deterministic
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]
+  - name: return_lse
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]

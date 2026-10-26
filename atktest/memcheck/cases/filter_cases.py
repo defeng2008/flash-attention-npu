@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""把既有精度用例裁剪成目标设备可直接执行的 memory_check 用例。
+"""把 ``cases/source`` 的全量用例转成目标设备可直接执行的 memory_check 用例。
 
 用法:
     python3 cases/filter_cases.py --device 950 [--interface func_v3] [--dry-run]
 
-950 会剔除以下用例（910 原样透传）：
-  1. 分页 KV cache 且 page_size 不在 {128, 256, 512, 1024}；
-  2. softcap > 0。
+910 与 950 使用同一份用例，不做裁剪；本脚本只负责按设备挑选接口、
+重排 ``id``，并把私有精度比较器换成开源 ATK 已注册的项。
 
-分页判定沿用生成器 ``generate_flash_attn_with_kvcache_v3.py`` 的约定：
-``page_table.range_values`` 不是字符串 "default" 即为分页，此时
-``page_size = k_cache.shape[1]``。
+用例自带的精度比较器 ``cv_fused_double_benchmark`` 来自私有包，开源 ATK 未注册它，
+会让 post_process 在构造比较器时抛 KeyError。memory_check 任务不做精度比对，
+因此统一替换为内置的 ``mixed_tolerance_bm_v2``，保证收尾流程可以正常走完。
 
 输出：``cases/<device>/<key>.json``，``id`` 重排为 0..N-1。
 """
 
 import argparse
-import collections
 import json
 from pathlib import Path
 
@@ -24,7 +22,18 @@ import yaml
 
 ATKTEST_DIR = Path(__file__).resolve().parent.parent
 MATRIX_PATH = ATKTEST_DIR / "atk_memory_check_matrix.yaml"
-PAGED_PAGE_SIZES_950 = (128, 256, 512, 1024)
+PRIVATE_ACC_STANDARDS = ("cv_fused_double_benchmark",)
+FALLBACK_ACC_STANDARD = "mixed_tolerance_bm_v2"
+
+
+def normalize_standard(case):
+    """把未注册的私有精度比较器替换为内存检查阶段够用的内置比较器。"""
+    acc = case.get("standard", {}).get("acc")
+    if not acc:
+        return
+    for name in PRIVATE_ACC_STANDARDS:
+        if name in acc:
+            acc[FALLBACK_ACC_STANDARD] = acc.pop(name)
 
 
 def load_interfaces():
@@ -32,42 +41,11 @@ def load_interfaces():
         return yaml.safe_load(handle)["interfaces"]
 
 
-def find_input(case, name):
-    for item in case.get("inputs", ()):
-        if isinstance(item, dict) and item.get("name") == name:
-            return item
-    return None
-
-
-def is_paged(case):
-    page_table = find_input(case, "page_table")
-    return bool(page_table) and page_table.get("range_values") != "default"
-
-
-def drop_reason(case, device):
-    """返回 None 表示保留，否则返回剔除原因。"""
-    if device != "950":
-        return None
-
-    if is_paged(case):
-        k_cache = find_input(case, "k_cache")
-        shape = k_cache.get("shape") if k_cache else None
-        page_size = shape[1] if shape and len(shape) > 1 else None
-        if page_size not in PAGED_PAGE_SIZES_950:
-            return f"page_size={page_size}"
-
-    softcap = find_input(case, "softcap")
-    value = softcap.get("range_values") if softcap else None
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-        return "softcap>0"
-
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", required=True, choices=["910", "950"])
     parser.add_argument("--interface", help="接口 key，缺省为矩阵中全部接口")
+    parser.add_argument("--limit", type=int, help="每个接口只保留前 N 条，用于冒烟")
     parser.add_argument("--dry-run", action="store_true", help="只打印统计，不写文件")
     args = parser.parse_args()
 
@@ -99,27 +77,19 @@ def main():
         with source.open(encoding="utf-8") as handle:
             cases = json.load(handle)
 
-        kept = []
-        reasons = collections.Counter()
-        for case in cases:
-            reason = drop_reason(case, args.device)
-            if reason:
-                reasons[reason] += 1
-                continue
-            kept.append(case)
+        if args.limit:
+            cases = cases[: args.limit]
 
-        for index, case in enumerate(kept):
+        for index, case in enumerate(cases):
             case["id"] = index
+            normalize_standard(case)
 
-        detail = ""
-        if reasons:
-            detail = "  (" + ", ".join(f"{name}: {count}" for name, count in reasons.most_common()) + ")"
-        print(f"{key}: kept {len(kept)}/{len(cases)}{detail}")
+        print(f"{key}: {len(cases)} cases")
 
         if not args.dry_run:
             target = out_dir / f"{key}.json"
             with target.open("w", encoding="utf-8") as handle:
-                json.dump(kept, handle, ensure_ascii=False, indent=2)
+                json.dump(cases, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
 
 

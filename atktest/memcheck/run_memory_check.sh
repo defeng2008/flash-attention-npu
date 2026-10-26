@@ -2,7 +2,7 @@
 # ATK memory_check runner for flash-attn v2/v3/v4 on Ascend 910 / 950.
 #
 #   ./run_memory_check.sh --device 950 --card 4
-#   ./run_memory_check.sh --device 950 --interface func_v3 --max-task 5
+#   ./run_memory_check.sh --device 950 --interface func_v3 --limit 5
 #   ./run_memory_check.sh --device 910 --interface func_v2,kvcache_v3
 set -uo pipefail
 
@@ -14,28 +14,31 @@ NODES_BASE="${ATKTEST_DIR}/nodes_memory_check.yaml"
 DEVICE=""
 CARD="0"
 IFACE_ARG=""
-MAX_TASK=""
+LIMIT=""
+MAX_PARALLEL=""
 
 usage() {
   cat <<'EOF'
 用法: ./run_memory_check.sh --device {910|950} [选项]
 
-  --device      必填，目标设备代际: 910 / 950
-  --card        物理卡号，默认 0
-  --interface   接口 key，逗号分隔；缺省为该设备支持的全部接口
-  --max-task    只跑前 N 条用例（ATK -mt），用于冒烟
-  --atk         atk 可执行文件路径（也可用环境变量 ATK_BIN）
+  --device       必填，目标设备代际: 910 / 950
+  --card         物理卡号，默认 0
+  --interface    接口 key，逗号分隔；缺省为该设备支持的全部接口
+  --limit        每个接口只跑前 N 条用例，用于冒烟
+  --max-parallel ATK 最大并发任务数（ATK -mt，默认 100；内存检查串行执行）
+  --atk          atk 可执行文件路径（也可用环境变量 ATK_BIN）
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --device)     DEVICE="${2:-}"; shift 2 ;;
-    --card)       CARD="${2:-}"; shift 2 ;;
-    --interface)  IFACE_ARG="${2:-}"; shift 2 ;;
-    --max-task)   MAX_TASK="${2:-}"; shift 2 ;;
-    --atk)        ATK="${2:-}"; shift 2 ;;
-    -h|--help)    usage; exit 0 ;;
+    --device)       DEVICE="${2:-}"; shift 2 ;;
+    --card)         CARD="${2:-}"; shift 2 ;;
+    --interface)    IFACE_ARG="${2:-}"; shift 2 ;;
+    --limit)        LIMIT="${2:-}"; shift 2 ;;
+    --max-parallel) MAX_PARALLEL="${2:-}"; shift 2 ;;
+    --atk)          ATK="${2:-}"; shift 2 ;;
+    -h|--help)      usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage; exit 2 ;;
   esac
 done
@@ -60,9 +63,18 @@ if [ ! -f "${MATRIX}" ]; then
   exit 2
 fi
 
+# ATK 的 -msl 只是事后读取日志，日志必须由外层的 mssanitizer 生成。
+MSAN="${MSAN_BIN:-$(command -v mssanitizer || true)}"
+if [ -z "${MSAN}" ]; then
+  echo "找不到 mssanitizer（请 source CANN set_env.sh 或用 MSAN_BIN 指定）" >&2
+  exit 2
+fi
+
 # 1. 按目标设备生成用例
 echo "=== 生成用例 (device=${DEVICE}) ==="
-python3 "${ATKTEST_DIR}/cases/filter_cases.py" --device "${DEVICE}" || exit 1
+FILTER_ARGS=(--device "${DEVICE}")
+[ -n "${LIMIT}" ] && FILTER_ARGS+=(--limit "${LIMIT}")
+python3 "${ATKTEST_DIR}/cases/filter_cases.py" "${FILTER_ARGS[@]}" || exit 1
 
 # 2. 待跑接口列表
 if [ -n "${IFACE_ARG}" ]; then
@@ -139,23 +151,27 @@ for key in "${INTERFACES[@]}"; do
   fi
 
   RUN_DIR="${ATKTEST_DIR}/reports/${DEVICE}/${key}"
+  MSS_LOG="${RUN_DIR}/mss_logs/${key}.log"
   mkdir -p "${RUN_DIR}/mss_logs" "${PLUGIN_DIR}/atk_output"
+  # 日志与 offset 必须成对重置，否则会按旧偏移读到空内容而误判通过。
+  rm -f "${MSS_LOG}" "${PLUGIN_DIR}/atk_output/mss/offset.txt"
   marker="$(mktemp)"
   touch "${marker}"
 
   cmd=(
+    "${MSAN}" --log-file "${MSS_LOG}" --log-level=warn --
     "${ATK}" task
     -c "${case_file}"
     -n "${NODES_FILE}"
     -p .
     --task memory_check
     -ms
-    -msl "${RUN_DIR}/mss_logs/${key}.log"
+    -msl "${MSS_LOG}"
     --single_process
     --log warning
   )
-  if [ -n "${MAX_TASK}" ]; then
-    cmd+=(-mt "${MAX_TASK}")
+  if [ -n "${MAX_PARALLEL}" ]; then
+    cmd+=(-mt "${MAX_PARALLEL}")
   fi
 
   echo
@@ -182,5 +198,10 @@ done
 echo
 echo "判读：reports/${DEVICE}/<接口>/ 下没有 mssanitizer.log 即该接口的用例全部通过内存检查。"
 echo "原始 sanitizer 日志：reports/${DEVICE}/<接口>/mss_logs/<接口>.log"
+
+# 按 --card 生成的节点文件只在本次运行有效。
+if [ "${NODES_FILE}" != "${NODES_BASE}" ]; then
+  rm -f "${NODES_FILE}"
+fi
 
 exit "${overall}"
