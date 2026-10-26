@@ -43,3 +43,10 @@ atktest/memcheck/cases/gen/result/
 atktest/memcheck/cases/gen/atk_output/
 # atktest 按 --card 临时生成的节点文件
 atktest/memcheck/nodes_memory_check.card*.yaml
+# atktest/perf 派生产物（gen_cases.py 生成 / 运行日志 / 各轮结果）
+atktest/perf/msprof/*/*_perf_cases.jsonl
+atktest/perf/msprof/run_*.log
+atktest/perf/msprof/*/run.log
+atktest/perf/msprof/*/performance*.json
+atktest/perf/msprof/*/performance.log
+atktest/perf/msprof/*/perf_report*.md
