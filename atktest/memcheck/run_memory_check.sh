@@ -7,7 +7,7 @@
 set -uo pipefail
 
 ATKTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ATK="${ATK_BIN:-/home/w00811046/miniconda3/envs/ascend/bin/atk}"
+ATK="${ATK_BIN:-$(command -v atk || true)}"
 MATRIX="${ATKTEST_DIR}/atk_memory_check_matrix.yaml"
 NODES_BASE="${ATKTEST_DIR}/nodes_memory_check.yaml"
 
@@ -54,8 +54,8 @@ if [ -f "${CANN_SET_ENV}" ]; then
   source "${CANN_SET_ENV}"
 fi
 
-if ! command -v "${ATK}" >/dev/null 2>&1; then
-  echo "找不到 atk: ${ATK}（请先 conda activate ascend 或用 --atk 指定）" >&2
+if [ -z "${ATK}" ] || ! command -v "${ATK}" >/dev/null 2>&1; then
+  echo "找不到 atk（请先 conda activate ascend，或用 --atk / ATK_BIN 指定）" >&2
   exit 2
 fi
 if [ ! -f "${MATRIX}" ]; then

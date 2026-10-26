@@ -45,9 +45,6 @@ atktest/memcheck/
 └── reports/<device>/<key>/        # 归档：atk_output 报告 + mss_logs
 ```
 
-用例的生成配置、生成脚本与产物均已复制进本目录，运行时不依赖
-`flash_attention_v2_v3_atk_delivery/` 与 `flash_attention_bnsd_atk_delivery/`。
-
 ## 3. 环境准备
 
 ```bash
