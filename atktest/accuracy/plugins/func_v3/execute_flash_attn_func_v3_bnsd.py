@@ -44,7 +44,6 @@ class FlashAttnFuncV3BnsdApi(BaseApi):
             }
             return gpu_fa3.flash_attn_func(**kwargs)
         if self.device == "npu":
-            import flash_attn_npu_3.flash_attn_npu_interface as interface
             from flash_attn_npu_3 import flash_attn_func
 
             kwargs = {
@@ -55,6 +54,8 @@ class FlashAttnFuncV3BnsdApi(BaseApi):
                 kwargs[name] = _bnsd_view(kwargs[name])
             if os.environ.get("FA_ATK_USE_SCHEDULER_METADATA", "1") != "0":
                 return flash_attn_func(**kwargs)
+            # 910/950 的接口实现在不同模块里，按实际加载的模块取
+            interface = sys.modules[flash_attn_func.__module__]
             original = interface.get_scheduler_metadata
             interface.get_scheduler_metadata = lambda *args, **params: None
             try:
