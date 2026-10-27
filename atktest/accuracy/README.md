@@ -10,7 +10,7 @@
 - 精度标准：`cv_fused_double_benchmark`，阈值 `max_re_ratio=2.0` / `avg_re_ratio=1.2` /
   `root_mean_squared_ratio=1.2`（与
   [flash_attn_func_v3.yaml](../../flash_attention_v2_v3_atk_delivery/interfaces/flash_attn_func_v3/flash_attn_func_v3.yaml#L8-L13) 一致）；
-  比较器由私有包 **`atk_private_precision`** 提供，无需自带实现，前置安装见 §4
+  比较器由私有包 **`atk_private_precision`** 提供，无需自带实现，前置安装见 §5
 
 ## 1. 目录结构
 
@@ -37,7 +37,60 @@ atktest/accuracy/
 
 `key` ∈ `func_v2` / `func_v3` / `func_v4` / `kvcache_v2` / `kvcache_v3`。
 
-## 2. BNSD 是怎么被测出来的
+## 2. 测试用例功能范围与数量
+
+### 2.1 功能范围
+
+| key | 被测接口 | 910 | 950 |
+|---|---|---|---|
+| `func_v2` | `flash_attn_func` v2 | ✓ | — |
+| `func_v3` | `flash_attn_func` v3 | ✓ | ✓ |
+| `func_v4` | `flash_attn_func` v4 | ✓ | ✓ |
+| `kvcache_v2` | `flash_attn_with_kvcache` v2 | ✓ | — |
+| `kvcache_v3` | `flash_attn_with_kvcache` v3 | ✓ | ✓ |
+
+- 覆盖 `flash_attn_func`（v2/v3/v4）与 `flash_attn_with_kvcache`（v2/v3）共 5 个入口，
+  含 **GQA / MHA**、**causal / non-causal**、**fp16 / bf16** 三类正交组合。
+- **仅 forward**（`backward=false`）：不测反向与 dropout，`softmax_scale` 固定 `0.125`。
+- 所有用例都强制命中 **BNSD 转置视图** 路径（约束见 §3）；kvcache 另有「非 paged +
+  无 append-KV + `capacity ≥ seqlen_q`」限制。
+
+5 个接口合计 80 条用例的因子分布：
+
+| 维度 | 取值 | 分布 |
+|---|---|---|
+| dtype | fp16 / bf16 | 40 / 40 |
+| causal | true / false | 41 / 39 |
+| B（batch）| 1 / 2 | 40 / 40 |
+| S_q（q 序列长）| 2 / 8 / 64 | 33 / 29 / 18 |
+| S_kv | func: 2 / 8 / 64；kvcache: cache 容量 16 / 32 / 64 / 128 | func 9 / 19 / 20；kvcache 8 / 6 / 9 / 9 |
+| H_q（q 头数）| 2 / 4 / 8 | 34 / 26 / 20 |
+| H_kv（kv 头数）| 2 / 4 / 8 | 50 / 27 / 3 |
+| GQA / MHA | `H_kv < H_q` / `H_kv == H_q` | 27 / 53 |
+| D（head_dim）| 16 / 32 / 64 / 128 | 22 / 20 / 17 / 21 |
+
+- `S_kv ≠ S_q` 的 cross-attention 组合被覆盖（如 `S_q=2 / S_kv=64`）；
+  causal 用例额外约束 `S_q ≤ S_kv`。
+- GQA 覆盖 4:2、8:4、8:2 等分组比；MHA 覆盖 `H_q = H_kv`。
+- 输入值域固定 `[-5, 5]`；`window_size=-1`、`softcap=0`、无 alibi，
+  `deterministic` / `pack_gqa` / `return_attn_probs` 均取默认关闭值。
+- kvcache 的 `cache_seqlens` 同时覆盖定长（如 `[64,64]`）与变长（如 `[1,128]`）两类。
+
+### 2.2 用例数量
+
+每个接口的 `cases/gen/<key>.yaml` 取 `dtype_numbers: 8`、`extra_numbers: 0`，
+即 **每种 dtype 8 条 × {fp16, bf16} = 16 条**；边界用例被关闭（生成时 `-en 0`）。
+
+| 设备 | 参与接口 | 用例数 |
+|---|---|---|
+| 910 | func_v2 / func_v3 / func_v4 / kvcache_v2 / kvcache_v3 | 5 × 16 = **80** |
+| 950 | func_v3 / func_v4 / kvcache_v3 | 3 × 16 = **48** |
+
+用例落盘链路：`cases/gen/<key>.yaml`（生成配置）→ `cases/source/<key>.json`
+（80 条自包含用例，由 `gen_cases.sh` 生成）→ `cases/<device>/<key>.json`
+（`filter_cases.py` 按设备挑选并重排 `id`，可直接执行）。
+
+## 3. BNSD 是怎么被测出来的
 
 对外接口签名仍是 BSND `(B, S, H, D)`，BNSD 只在 **execute 插件的 npu 分支**注入：
 
@@ -61,7 +114,7 @@ def _bnsd_view(tensor):
 npu 分支还带一行防御性断言 `assert not view.is_contiguous()`：若某条用例因 shape 退化
 没走到 BNSD 路径，会立刻暴露而不是「静默通过」。
 
-## 3. 单标杆 vs 双标杆
+## 4. 单标杆 vs 双标杆
 
 两者用**同一份用例、同一个比较器**，差别只有节点表：
 
@@ -78,7 +131,7 @@ npu 分支还带一行防御性断言 `assert not view.is_contiguous()`：若某
 > Dao-AILab flash-attention。GPU 与 NPU 结果本来就可能不一致（不同 kernel / 不同累加顺序），
 > 双标杆的价值是把两边差异都量化出来。
 
-## 4. 快速开始
+## 5. 快速开始
 
 前置：`cv_fused_double_benchmark` 比较器由私有包提供，**必须先装**，否则 post_process 阶段
 会 `KeyError: 'cv_fused_double_benchmark'`。
@@ -112,7 +165,7 @@ cd atktest/accuracy
 
 指定卡号：`--card 4`；指定 python 环境里的 atk：`--atk /path/to/atk`。
 
-## 5. 精度比较器口径
+## 6. 精度比较器口径
 
 比较器 `cv_fused_double_benchmark` 由私有包 `atk_private_precision`（0.1.0）提供，
 类为 `atk_private_precision.post_process.cv_fused_double_benchmark_compare.CvFusedDoubleBenchmarkAccuracyCompare`，
@@ -141,11 +194,11 @@ dtype 基础容差"。yaml 里的三个 ratio（`max_re_ratio` / `avg_re_ratio` 
 > `max_re` 按整张量量程归一）。装上私有包后该文件已删除，避免与私有实现抢同名注册
 > （`atk task -p .` 注册在私有包之后，会**覆盖**掉私有实现）。
 
-## 6. 常见问题
+## 7. 常见问题
 
 | 现象 | 处理 |
 |---|---|
-| `KeyError: 'cv_fused_double_benchmark'` | 私有包没装：`pip install atk_private_precision-*.whl`，用 §4 的注册检查确认 |
+| `KeyError: 'cv_fused_double_benchmark'` | 私有包没装：`pip install atk_private_precision-*.whl`，用 §5 的注册检查确认 |
 | `ct-tool not installed` | `cv_fused_double_benchmark_ct` 才能用的可选工具缺失，跑 `cv_fused_double_benchmark` 时只是提示，可忽略 |
 | 想知道实际用的是私有实现还是自带插件 | `python -c "from atk.tasks.post_process import AccuracyFactory as A; print(A.get_accuracy('cv_fused_double_benchmark').__module__)"`，应是 `atk_private_precision.*` |
 | `atk: command not found` | 先 `conda activate ascend`，或用 `--atk` / `ATK_BIN` 指定 |
@@ -154,7 +207,7 @@ dtype 基础容差"。yaml 里的三个 ratio（`max_re_ratio` / `avg_re_ratio` 
 | 双标杆卡住 | GPU 主机不可达：核对 `nodes_accuracy_double_bm.yaml` 的 host/port，或退回 `--mode single` |
 | npu 分支断言失败（BNSD 未命中） | 该条用例 shape 退化（H/H_kv/S < 2）；检查对应生成器里 `HEADS` / `MIN_SEQLEN` 约束 |
 
-## 7. 报告
+## 8. 报告
 
 `reports/<device>/<接口>/<mode>/<run>/` 下：
 
