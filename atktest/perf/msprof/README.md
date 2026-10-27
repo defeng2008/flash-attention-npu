@@ -6,6 +6,8 @@
 
 **判定只看平均值**：`mean_speedup = mean(BSND 耗时 / BNSD 耗时)`，`< 1` 表示 BNSD 更慢；
 对应的劣化百分比为 `(BNSD 均值 / BSND 均值 - 1) × 100%`。
+**达标判据：平均劣化 ≤ 5%**（`aggregate.py::MAX_MEAN_DEGRADE`），`run_msprof.sh --summary`
+按该判据逐接口打印 PASS/FAIL 并给出总判定；`perf_report.md` 同步带 `判定` 行。
 
 ## 设备与接口矩阵
 

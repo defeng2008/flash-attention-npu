@@ -61,10 +61,14 @@ import json
 import os
 from pathlib import Path
 
+# 达标判据：平均劣化（mean_asc_us / mean_ref_us - 1）不超过 5%。
+# 单个接口可用 performance.json 里的 max_mean_degrade 覆盖。
+LIMIT = 0.05
+
 root = Path(os.environ["MSFROF_DIR"])
 keys = os.environ["KEYS"].split()
-print(f"{'接口':<12}{'有效/总':>8}{'BSND均值us':>12}{'BNSD均值us':>12}{'平均耗时劣化':>14}{'平均加速比':>12}")
-rows = []
+print(f"{'接口':<12}{'有效/总':>8}{'BSND均值us':>12}{'BNSD均值us':>12}{'平均耗时劣化':>14}{'平均加速比':>12}{'判定':>7}")
+rows, verdicts = [], []
 for key in keys:
     path = root / key / "performance.json"
     if not path.is_file():
@@ -72,16 +76,25 @@ for key in keys:
         continue
     data = json.loads(path.read_text(encoding="utf-8"))
     ref, asc = data["mean_ref_us"], data["mean_asc_us"]
-    degrade = (asc - ref) / ref * 100 if ref else float("nan")
-    rows.append((key, data["n_cases_valid"], data["n_cases_total"], ref, asc, degrade,
-                 data["mean_speedup"]))
+    degrade = asc / ref - 1 if ref else float("nan")
+    limit = data.get("max_mean_degrade", LIMIT)
+    ok = degrade <= limit
+    rows.append((ref, asc, limit))
+    verdicts.append((key, ok))
     print(f"{key:<12}{data['n_cases_valid']:>4}/{data['n_cases_total']:<3}{ref:>12.2f}{asc:>12.2f}"
-          f"{degrade:>13.2f}%{data['mean_speedup']:>12.4f}")
+          f"{degrade * 100:>13.2f}%{data['mean_speedup']:>12.4f}{'PASS' if ok else 'FAIL':>7}")
 if rows:
-    total_ref = sum(r[3] for r in rows)
-    total_asc = sum(r[4] for r in rows)
+    total_ref = sum(r[0] for r in rows)
+    total_asc = sum(r[1] for r in rows)
+    total_limit = min(r[2] for r in rows)
+    total_degrade = total_asc / total_ref - 1
     print(f"{'合计':<12}{'':>8}{total_ref:>12.2f}{total_asc:>12.2f}"
-          f"{(total_asc - total_ref) / total_ref * 100:>13.2f}%{total_ref / total_asc:>12.4f}")
+          f"{total_degrade * 100:>13.2f}%{total_ref / total_asc:>12.4f}"
+          f"{'PASS' if total_degrade <= total_limit else 'FAIL':>7}")
+if verdicts:
+    n_ok = sum(1 for _, ok in verdicts if ok)
+    print(f"\n判定（平均劣化 ≤ {LIMIT * 100:.0f}%）：{n_ok}/{len(verdicts)} 接口 PASS -> "
+          f"{'PASS' if n_ok == len(verdicts) else 'FAIL'}")
 PY
 }
 

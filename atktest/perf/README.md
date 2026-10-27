@@ -90,7 +90,10 @@ cd atktest/perf/msprof
   `mean_asc_us` 为平均值口径，`perf_report.md` 是同一份数据的表格形式。
 - 多轮运行保留 `performance.pass<N>.json`，`aggregate.py` 逐用例取中位数后重写
   `performance.json` 与 `perf_report.md`。
-- 判据看**平均值**，不看单次最小/最大值。
+- 判据看**平均值**，不看单次最小/最大值：`平均劣化 = mean_asc_us / mean_ref_us - 1`，
+  **≤ 5% 判 PASS**。该判据由 `aggregate.py`（`MAX_MEAN_DEGRADE`）写进 `performance.json`
+  的 `mean_degrade` / `max_mean_degrade` / `pass`，`./run_msprof.sh --summary` 直接输出
+  每个接口与汇总的 PASS/FAIL。
 
 ## 限制
 
@@ -98,6 +101,6 @@ cd atktest/perf/msprof
 - kvcache 只覆盖非 paged，且不使用 `sq=1`：此时 BNSD 的 q 视图 stride 与连续 BSND 相同，
   布局探测会退回 BSND，kernel 报 `v must be contiguous`，因此统一取 `sq >= 64`。
 - head_dim 统一 128。
-- 不设达标阈值，只做布局间的相对比较。
+- 达标阈值固定为 `平均劣化 ≤ 5%`（`aggregate.py::MAX_MEAN_DEGRADE`），只做布局间的相对比较。
 - 本机 950 为共享机器，其他用户的任务会周期性抢卡。解析器已剔除 msprof 的事件打点行并按
   迭代周期切块，但仍建议多轮取中位数，并对可疑结果用 `op_summary` 的单 kernel 耗时交叉验证。

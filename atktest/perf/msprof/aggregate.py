@@ -15,6 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+# 达标判据：BNSD 相对 BSND 的平均劣化（mean_asc_us / mean_ref_us - 1）不超过 5%。
+MAX_MEAN_DEGRADE = 0.05
+
 
 def _write_report(key, merged):
     lines = [
@@ -45,6 +48,8 @@ def _write_report(key, merged):
         f"| BSND 平均耗时 (us) | {merged['mean_ref_us']:.2f} |",
         f"| BNSD 平均耗时 (us) | {merged['mean_asc_us']:.2f} |",
         f"| 平均劣化 | {(merged['mean_asc_us'] / merged['mean_ref_us'] - 1) * 100:.2f}% |",
+        f"| 判定（平均劣化 ≤ {merged['max_mean_degrade'] * 100:.0f}%） | "
+        f"{'PASS' if merged['pass'] else 'FAIL'} |",
         "",
     ]
     (ROOT / key / "perf_report.md").write_text("\n".join(lines), encoding="utf-8")
@@ -75,6 +80,9 @@ def aggregate(key):
         )
 
     speedups = [case["speedup"] for case in per_case]
+    mean_ref_us = statistics.mean(case["ref_us"] for case in per_case)
+    mean_asc_us = statistics.mean(case["asc_us"] for case in per_case)
+    mean_degrade = mean_asc_us / mean_ref_us - 1
     merged = {
         **runs[-1],
         "n_cases_valid": len(per_case),
@@ -82,8 +90,11 @@ def aggregate(key):
         "median_speedup": statistics.median(speedups),
         "min_speedup": min(speedups),
         "max_speedup": max(speedups),
-        "mean_ref_us": statistics.mean(case["ref_us"] for case in per_case),
-        "mean_asc_us": statistics.mean(case["asc_us"] for case in per_case),
+        "mean_ref_us": mean_ref_us,
+        "mean_asc_us": mean_asc_us,
+        "mean_degrade": mean_degrade,
+        "max_mean_degrade": MAX_MEAN_DEGRADE,
+        "pass": mean_degrade <= MAX_MEAN_DEGRADE,
         "per_case": per_case,
         "passes": len(runs),
     }
@@ -91,7 +102,8 @@ def aggregate(key):
         json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     _write_report(key, merged)
-    print(f"[{key}] 合并 {len(runs)} 轮 -> {len(per_case)} 用例，均值加速比 {merged['mean_speedup']:.4f}")
+    print(f"[{key}] 合并 {len(runs)} 轮 -> {len(per_case)} 用例，均值加速比 {merged['mean_speedup']:.4f}"
+          f"，平均劣化 {mean_degrade * 100:+.2f}% -> {'PASS' if merged['pass'] else 'FAIL'}")
     return True
 
 
