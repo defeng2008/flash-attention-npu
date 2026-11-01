@@ -36,6 +36,7 @@ using namespace KernelCommon;
 #include "fag_tiling.cpp"
 #include "bwd_dispatch.hpp"
 #include "combine_dispatch.hpp"
+#include "mla/mla_forward.h"
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -138,6 +139,17 @@ static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor
         c10_npu::NPUCachingAllocator::recordStream(seqlensQ->storage().data_ptr(), aicpuStream);
     }
     return meta;
+}
+
+// MLA (multi-head latent attention) shape signature (docs/mla/mla_design.md §3.2):
+// decode/compressed passes qv with Dq=64 and Dv=512, prefill has no qv with
+// Dq=192 and Dv=128. Other head-dim combinations belong to the ordinary FA4 path.
+static bool IsMlaForward(const at::Tensor& q, const at::Tensor& v, const std::optional<at::Tensor>& qv)
+{
+    const int64_t qHeaddim = q.size(-1);
+    const int64_t vHeaddim = v.size(-1);
+    return qv.has_value() ? (qHeaddim == 64 && vHeaddim == 512)
+                          : (qHeaddim != vHeaddim && qHeaddim == 192 && vHeaddim == 128);
 }
 
 std::vector<at::Tensor> mha_fwd(
@@ -764,6 +776,15 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   std::optional<bool> pack_gqa = std::nullopt, int64_t = 0,
                                   std::optional<at::Tensor> seqused_q = std::nullopt)
 {
+    if (headdim != headdim_v) {
+        // MLA compressed (64/512) and prefill (192/128) metadata come from the
+        // shared MLA scheduler. The v4 signature carries no qkv_dtype; the
+        // record's dtype field does not change the layout, so tag it BF16.
+        return flash_attn::mla::SchedulerMetadata(
+            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v, at::kBFloat16,
+            cache_seqlens, cu_seqlens_q, std::nullopt, window_left, window_right, causal, false, num_splits, pack_gqa,
+            0);
+    }
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     TORCH_CHECK(cache_seqlens.device().type() == at::kPrivateUse1, "cache_seqlens must be on NPU");
     TORCH_CHECK(cache_seqlens.dtype() == at::kInt && cache_seqlens.dim() == 1 && cache_seqlens.numel() == batch_size,
@@ -1377,10 +1398,42 @@ std::vector<at::Tensor> mha_combine(at::Tensor out_partial, at::Tensor lse_parti
     return {out, lse_out};
 }
 
+// Forward dispatch entry point. MLA keeps its own host implementation, every
+// other input goes through the ordinary FA4 path. The two documented MLA shape
+// signatures are checked by IsMlaForward (docs/mla/mla_design.md §3.2).
+std::vector<at::Tensor> fa_fwd(
+    at::Tensor q, at::Tensor k, at::Tensor v, std::optional<at::Tensor> q_v_, std::optional<at::Tensor> out_,
+    std::optional<at::Tensor> cu_seqlens_q_, std::optional<at::Tensor> cu_seqlens_k_,
+    std::optional<at::Tensor> seqused_q_, std::optional<at::Tensor> seqused_k_, std::optional<int64_t> max_seqlen_q_,
+    std::optional<int64_t> max_seqlen_k_, std::optional<int64_t> min_seqlen_k_,
+    std::optional<at::Tensor> page_table_, std::optional<at::Tensor> gather_kv_indices_,
+    std::optional<float> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
+    float softcap, int64_t num_splits, std::optional<bool> pack_gqa_, std::optional<at::Tensor> learnable_sink_,
+    std::optional<at::Tensor> scheduler_metadata_, int64_t sm_margin, int64_t layout)
+{
+    // gather_kv_indices is unsupported for every FA4 forward, including MLA.
+    TORCH_CHECK(!gather_kv_indices_.has_value(), "NPU FlashAttention does not support gather_kv_indices");
+    if (IsMlaForward(q, v, q_v_)) {
+        if (auto result = flash_attn::mla::mla_fwd(
+                q, k, v, std::nullopt, std::nullopt, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, std::nullopt, seqused_q_,
+                seqused_k_, max_seqlen_q_, max_seqlen_k_, page_table_, std::nullopt, std::nullopt, std::nullopt,
+                std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                softmax_scale_ ? std::optional<double>(static_cast<double>(*softmax_scale_)) : std::nullopt, is_causal,
+                window_size_left, window_size_right, 0, static_cast<double>(softcap), true, scheduler_metadata_,
+                num_splits, pack_gqa_, sm_margin, layout)) {
+            return std::move(*result);
+        }
+    }
+    return mha_fwd(q, k, v, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, seqused_q_, seqused_k_, max_seqlen_q_,
+                   max_seqlen_k_, min_seqlen_k_, page_table_, gather_kv_indices_, softmax_scale_, is_causal,
+                   window_size_left, window_size_right, softcap, num_splits, pack_gqa_, learnable_sink_,
+                   scheduler_metadata_, sm_margin, layout);
+}
+
 PYBIND11_MODULE(flash_attn_npu_4, m)
 {
     m.doc() = "FlashAttention";
-    m.def("fwd", &mha_fwd, "Forward pass, with KV-cache");
+    m.def("fwd", &fa_fwd, "Forward pass, with KV-cache");
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("get_scheduler_metadata", &get_scheduler_metadata, "Precompute scheduler metadata (tiling) on AICPU");
     m.def("fwd_combine", &mha_combine, "Combine split attention partial outputs", py::arg("out_partial"),

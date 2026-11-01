@@ -40,6 +40,21 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+def _is_mla(q, v, qv, cu_seqlens_q=None):
+    """True when the call is the MLA (multi-head latent attention) forward path.
+
+    MLA shares this entry point: compressed MLA passes ``qv`` (Dq=64, Dv=512),
+    prefill MLA has Dq=192 while Dv=128. Both are rejected by the FA4 kernel, so
+    they are routed to the MLA dispatch inside the native forward.
+    """
+    return qv is not None or (
+        (cu_seqlens_q is None or q.ndim == 3)
+        and q.ndim > 0
+        and v.ndim > 0
+        and q.shape[-1] != v.shape[-1]
+    )
+
+
 _LAYOUT_TND = 0
 _LAYOUT_BSND = 1
 _LAYOUT_BNSD = 2
@@ -214,7 +229,12 @@ def _flash_attn_forward(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if cu_seqlens_q is not None:
         _validate_varlen_query(q, cu_seqlens_q, max_seqlen_q=max_seqlen_q)
-    q, k, v = _prepare_forward_qkv(q, k, v, page_table)
+    # Packed inputs are the common case and need no stride rewriting, so the
+    # materialization pass is only entered when a view actually needs it. This
+    # is equivalent to always calling it (a contiguous tensor is returned
+    # unchanged by ``_prepare_forward_qkv``).
+    if not (q.is_contiguous() and k.is_contiguous() and v.is_contiguous()):
+        q, k, v = _prepare_forward_qkv(q, k, v, page_table)
     cu_seqlens_q, cu_seqlens_k = [maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k)]
     seqused_q, seqused_k = [maybe_contiguous(x) for x in (seqused_q, seqused_k)]
     page_table = maybe_contiguous(page_table)
@@ -741,31 +761,39 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
 
-        # Compute scheduler metadata on the AICPU (no D2H/H2D sync), matching
-        # the v3 dense path. cache_seqlens holds the per-batch KV lengths.
-        batch_size, seqlen_q, num_heads, head_size = q.shape
-        seqlen_k = k.shape[1]
-        num_heads_k = k.shape[2]
-        head_size_v = v.shape[-1]
-        # get_scheduler_metadata only takes numbers and reads them as BSND, so the
-        # sizes above come from the pre-detection shapes; BNSD only re-views the
-        # same storage.
-        layout, q, k, v, out_transposed = _detect_layout(q, k, v, None, None)
-        seqused_k = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
-        scheduler_metadata = get_scheduler_metadata(
-            max_seqlen_q=seqlen_q,
-            max_seqlen_k=seqlen_k,
-            nheads=num_heads,
-            nheads_kv=num_heads_k,
-            headdim=head_size,
-            num_splits=num_splits,
-            headdim_v=head_size_v,
-            pack_gqa=pack_gqa,
-            causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
-            seqused_k=seqused_k,
-        )
+        # MLA shares this entry point. It carries its own tiling contract, so it
+        # skips the FA4 scheduler metadata and only accepts TND/BSND inputs.
+        # A BSND-shaped view over contiguous BNSD storage (``transpose(1, 2)``)
+        # is accepted through its strides: the native MLA path consumes the BSND
+        # shape only, and ``out`` keeps that BSND shape.
+        scheduler_metadata = None
+        layout = _LAYOUT_BSND
+        if not _is_mla(q, v, qv):
+            # Compute scheduler metadata on the AICPU (no D2H/H2D sync), matching
+            # the v3 dense path. cache_seqlens holds the per-batch KV lengths.
+            batch_size, seqlen_q, num_heads, head_size = q.shape
+            seqlen_k = k.shape[1]
+            num_heads_k = k.shape[2]
+            head_size_v = v.shape[-1]
+            # get_scheduler_metadata only takes numbers and reads them as BSND, so the
+            # sizes above come from the pre-detection shapes; BNSD only re-views the
+            # same storage.
+            layout, q, k, v, out_transposed = _detect_layout(q, k, v, None, None)
+            seqused_k = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
+            scheduler_metadata = get_scheduler_metadata(
+                max_seqlen_q=seqlen_q,
+                max_seqlen_k=seqlen_k,
+                nheads=num_heads,
+                nheads_kv=num_heads_k,
+                headdim=head_size,
+                num_splits=num_splits,
+                headdim_v=head_size_v,
+                pack_gqa=pack_gqa,
+                causal=causal,
+                window_size_left=window_size[0],
+                window_size_right=window_size[1],
+                seqused_k=seqused_k,
+            )
 
         out, softmax_lse = _flash_attn_forward(
             q,
@@ -925,18 +953,25 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         seqlen_k_per_split=None,
         disable_scheduler_metadata=False,
     ):
-        if cu_seqlens_q is not None:
+        is_mla = _is_mla(q, v, qv, cu_seqlens_q)
+        if cu_seqlens_q is not None and not is_mla:
             _validate_varlen_query(q, cu_seqlens_q, max_seqlen_q=max_seqlen_q)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # cu_seqlens_q packs the query (TND); otherwise the rank-4 data is BSND.
+        # cu_seqlens_q packs the query (TND); otherwise the rank-4 data is BSND,
+        # which also covers a BSND-shaped view over contiguous BNSD storage.
         layout = _LAYOUT_TND if cu_seqlens_q is not None else _LAYOUT_BSND
+        if is_mla:
+            # MLA carries its own tiling contract, so it skips the FA4 scheduler
+            # metadata and consumes the BSND shape; the strides carry the layout.
+            scheduler_metadata = None
+            disable_scheduler_metadata = True
         if seqused_k is not None and isinstance(seqused_k, int):
             seqused_k = torch.full((q.shape[0],), seqused_k, dtype=torch.int32, device=k.device)
             seqused_k = maybe_contiguous(seqused_k)
 
         fwd_max_seqlen_k = max_seqlen_k
-        if scheduler_metadata is None and not disable_scheduler_metadata and q.shape[0] != 0:
+        if not is_mla and scheduler_metadata is None and not disable_scheduler_metadata and q.shape[0] != 0:
             is_varlen_q = cu_seqlens_q is not None
             num_heads = q.shape[1] if is_varlen_q else q.shape[2]
             head_size = q.shape[2] if is_varlen_q else q.shape[3]

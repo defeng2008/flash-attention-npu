@@ -16,8 +16,8 @@ from typing import List, Optional
 # dropped here.
 #
 # The real compile-time axes are dtype and input layout. The forward supports
-# the three input layouts (TND / BSND / BNSD), as does the backward.
-# Each generated .cpp holds exactly ONE
+# the three input layouts (TND / BSND / BNSD); the backward only two (TND /
+# BSND — BNSD never enters the backward). Each generated .cpp holds exactly ONE
 # explicit instantiation of the per-family dispatch template, so the heavy
 # kernel templates land in separate, parallel-compiled translation units. The
 # impl bodies live in the shared fwd_dispatch_impl.hpp / bwd_dispatch_common.hpp
@@ -42,7 +42,6 @@ FWD_LAYOUTS = [
 BWD_LAYOUTS = [
     ("bsnd", "BSND", "BSND"),
     ("tnd", "TND", "TND"),
-    ("bnsd", "BNSD", "BNSD"),
 ]
 
 PRELUDE = (
@@ -107,6 +106,28 @@ class Kernel:
     content: str
 
 
+# MLA groups layout instantiations by implementation family and dtype. This
+# keeps parallel compilation without a separate macro-configured file per layout.
+MLA_FAMILIES = {
+    "auto_split": ("mla_auto_split_dispatch_impl.hpp", [("LaunchCompressed", "MlaLaunchArgs", "")]),
+    "prefill": ("mla_prefill_dispatch_impl.hpp", [("LaunchPrefill", "MlaLaunchArgs", "")]),
+    "gqa": ("mla_gqa_dispatch_impl.hpp", [("LaunchGrouped", "MlaLaunchArgs", "")]),
+}
+
+
+def mla_kernel(dtype: str, family: str, header: str, entries: list) -> Kernel:
+    ctype = DTYPE_MAP[dtype]
+    body = PRELUDE + (
+        "// Generated MLA template instantiations.\n"
+        f'#include "../mla/{header}"\n\n'
+        "namespace flash_attn::mla {\n"
+    )
+    for launch, arguments, options in entries:
+        body += f"template aclError {launch}<{ctype}{options}>(const {arguments}&);\n"
+    body += "} // namespace flash_attn::mla\n"
+    return Kernel("mla", dtype, family, f"mla_dispatch_{dtype}_{family}.cpp", body)
+
+
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
@@ -114,6 +135,8 @@ def get_all_kernels() -> List[Kernel]:
             kernels.append(fwd_kernel(dtype, layout))
         for layout in BWD_LAYOUTS:
             kernels.append(bwd_kernel(dtype, layout))
+        for family, (header, entries) in MLA_FAMILIES.items():
+            kernels.append(mla_kernel(dtype, family, header, entries))
     return kernels
 
 

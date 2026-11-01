@@ -36,6 +36,7 @@ using namespace KernelCommon;
 #include "fwd_dispatch.hpp"
 #include "bwd_dispatch.hpp"
 #include "combine_dispatch.hpp"
+#include "mla/mla_forward.h"
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -162,6 +163,17 @@ static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor
     return meta;
 }
 
+// MLA (multi-head latent attention) shape signature (docs/mla/mla_design.md §3.2):
+// decode/compressed passes qv with Dq=64 and Dv=512, prefill has no qv with
+// Dq=192 and Dv=128. Other head-dim combinations belong to the ordinary FA3 path.
+static bool IsMlaForward(const at::Tensor& q, const at::Tensor& v, const std::optional<at::Tensor>& qv)
+{
+    const int64_t qHeaddim = q.size(-1);
+    const int64_t vHeaddim = v.size(-1);
+    return qv.has_value() ? (qHeaddim == 64 && vHeaddim == 512)
+                          : (qHeaddim != vHeaddim && qHeaddim == 192 && vHeaddim == 128);
+}
+
 std::vector<at::Tensor> mha_fwd(
     at::Tensor q, // (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
     at::Tensor
@@ -190,12 +202,13 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> q_descale_,      // (b, h_k), not (b, h)
     std::optional<at::Tensor> k_descale_,      // (b, h_k)
     std::optional<at::Tensor> v_descale_,      // (b, h_k)
-    std::optional<float> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
-    int64_t attention_chunk, float softcap,
+    std::optional<double> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
+    int64_t attention_chunk, double softcap_option,
     bool is_rotary_interleaved, // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
     std::optional<at::Tensor> scheduler_metadata_, // (b + 1)
     int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin, int64_t layout)
 {
+    const float softcap = static_cast<float>(softcap_option);
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto hostStart = std::chrono::steady_clock::now();
 
@@ -805,6 +818,15 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
                                   int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
 {
+    if (headdim != headdim_v) {
+        TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !cache_leftpad && max_seqlen_k_new == 0 &&
+                        attention_chunk == 0,
+                    "MLA: metadata append, leftpad and attention_chunk are unsupported");
+        return flash_attn::mla::SchedulerMetadata(
+            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v,
+            pybind11::cast<at::ScalarType>(qkv_dtype), cache_seqlens, seqlens_q, page_size, window_size_left,
+            window_size_right, causal, has_softcap, num_splits, pack_gqa, sm_margin);
+    }
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     const bool is_varlen_q = seqlens_q.has_value();
     void* seqlensQDev = nullptr;
@@ -1399,10 +1421,43 @@ std::vector<at::Tensor> mha_combine(at::Tensor out_partial, at::Tensor lse_parti
     return {out, lse_out};
 }
 
+// Forward dispatch entry point. MLA keeps its own host implementation, every
+// other input goes through the ordinary FA3 path. The two documented MLA shape
+// signatures are checked by IsMlaForward (docs/mla/mla_design.md §3.2).
+std::vector<at::Tensor> fa_fwd(
+    at::Tensor q, at::Tensor k, at::Tensor v, std::optional<at::Tensor> k_new_, std::optional<at::Tensor> v_new_,
+    std::optional<at::Tensor> q_v_, std::optional<at::Tensor> out_, std::optional<at::Tensor> cu_seqlens_q_,
+    std::optional<at::Tensor> cu_seqlens_k_, std::optional<at::Tensor> cu_seqlens_k_new_,
+    std::optional<at::Tensor> seqused_q_, std::optional<at::Tensor> seqused_k_, std::optional<int64_t> max_seqlen_q_,
+    std::optional<int64_t> max_seqlen_k_, std::optional<at::Tensor> page_table_, std::optional<at::Tensor> kv_batch_idx_,
+    std::optional<at::Tensor> leftpad_k_, std::optional<at::Tensor> rotary_cos_, std::optional<at::Tensor> rotary_sin_,
+    std::optional<at::Tensor> seqlens_rotary_, std::optional<at::Tensor> q_descale_, std::optional<at::Tensor> k_descale_,
+    std::optional<at::Tensor> v_descale_, std::optional<double> softmax_scale_, bool is_causal, int64_t window_size_left,
+    int64_t window_size_right, int64_t attention_chunk, double softcap_option, bool is_rotary_interleaved,
+    std::optional<at::Tensor> scheduler_metadata_, int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin,
+    int64_t layout)
+{
+    if (IsMlaForward(q, v, q_v_)) {
+        if (auto result = flash_attn::mla::mla_fwd(
+                q, k, v, k_new_, v_new_, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, cu_seqlens_k_new_, seqused_q_,
+                seqused_k_, max_seqlen_q_, max_seqlen_k_, page_table_, kv_batch_idx_, leftpad_k_, rotary_cos_,
+                rotary_sin_, seqlens_rotary_, q_descale_, k_descale_, v_descale_, softmax_scale_, is_causal,
+                window_size_left, window_size_right, attention_chunk, softcap_option, is_rotary_interleaved,
+                scheduler_metadata_, num_splits, pack_gqa_, sm_margin, layout)) {
+            return std::move(*result);
+        }
+    }
+    return mha_fwd(q, k, v, k_new_, v_new_, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, cu_seqlens_k_new_, seqused_q_,
+                   seqused_k_, max_seqlen_q_, max_seqlen_k_, page_table_, kv_batch_idx_, leftpad_k_, rotary_cos_,
+                   rotary_sin_, seqlens_rotary_, q_descale_, k_descale_, v_descale_, softmax_scale_, is_causal,
+                   window_size_left, window_size_right, attention_chunk, softcap_option, is_rotary_interleaved,
+                   scheduler_metadata_, num_splits, pack_gqa_, sm_margin, layout);
+}
+
 PYBIND11_MODULE(flash_attn_npu_3, m)
 {
     m.doc() = "FlashAttention";
-    m.def("fwd", &mha_fwd, "Forward pass, with KV-cache");
+    m.def("fwd", &fa_fwd, "Forward pass, with KV-cache");
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("get_scheduler_metadata", &get_scheduler_metadata, "Precompute scheduler metadata (tiling) on AICPU");
     m.def("fwd_combine", &mha_combine, "Combine split attention partial outputs", py::arg("out_partial"),

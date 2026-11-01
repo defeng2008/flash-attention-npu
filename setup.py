@@ -98,25 +98,12 @@ BUILD_NPU = get_build_npu()
 # 开启后：
 #  - 910 (dav-2201)：编译追加 "-g --cce-enable-sanitizer"，链接追加 "--cce-enable-sanitizer"（静态插桩）；
 #  - 950 (dav-3510)：CANN 9.1.0 未提供 sanitizer stub（libsanitizer_stub_dav-c310），无法静态插桩，
-#                    追加 "-g -fno-jump-tables"，内存检测需配合 mssanitizer 运行时注入：
-#                    mssanitizer --tool=memcheck -- python -m pytest ...
-# 910 / 950 均须通过 mssanitizer --tool=memcheck -- python -m pytest ... 启动。
-# 静态插桩也依赖检测运行时初始化，不能直接运行插桩后的二进制。
-# FLASH_ATTN_MSSANITIZER_MODE=auto（默认：910 static / 950 runtime）、static、runtime。
-# 910 图捕获须使用 runtime 或普通构建；静态插桩会触发 AssignGlobalHead 107030。
-# runtime 仅准备运行时插桩产物，是否覆盖图内 kernel 仍须检查工具日志和越界对照。
+#                    仅追加 "-g"（报告定位信息），内存检测需配合 mssanitizer 运行时注入：
+#                    mssanitizer --tool=memcheck python -m pytest ...
 # "-g" 用于异常报告输出文件名/行号/调用栈；静态插桩可检测越界访问、多核踩踏、非对齐访问等。
 # 仅用于调试定位，会显著增大二进制并降低性能。建议通过 bdist_wheel 独立产出检测版，
 # 避免覆盖正常版本（editable 安装下正常 .so 位于 flash_attn_npu/ 目录内）。
 ENABLE_MSSANITIZER = os.getenv("FLASH_ATTN_ENABLE_MSSANITIZER", "FALSE") == "TRUE"
-# Static instrumentation is for eager checking. Graph execution needs a build
-# without static stubs; runtime mode retains symbols for optional tool checking.
-MSSANITIZER_MODE = os.getenv("FLASH_ATTN_MSSANITIZER_MODE", "auto").lower()
-if MSSANITIZER_MODE not in ("auto", "static", "runtime"):
-    raise RuntimeError(
-        f"Invalid FLASH_ATTN_MSSANITIZER_MODE={MSSANITIZER_MODE!r}; "
-        "choose auto, static, or runtime."
-    )
 
 
 def get_platform():
@@ -301,13 +288,7 @@ class BishengBuildExt(build_ext):
         # （libsanitizer_stub_dav-c310 缺失），950 编译时加 "--cce-enable-sanitizer" 会在设备链接阶段
         # 报 "unable to find library -lsanitizer_stub_dav-c310"。
         # 950 (dav-3510) 请改用 mssanitizer 运行时注入（编译不加插桩，运行测试命令前加 mssanitizer 前缀）。
-        if ENABLE_MSSANITIZER and MSSANITIZER_MODE == "static" and is_ascend950:
-            raise RuntimeError(
-                "Static msSanitizer instrumentation is unavailable for Ascend950; use runtime."
-            )
-        use_ms_static = (
-            ENABLE_MSSANITIZER and not is_ascend950 and MSSANITIZER_MODE != "runtime"
-        )
+        use_ms_static = ENABLE_MSSANITIZER and not is_ascend950
         if use_ms_static:
             link_arch_flags = ["--cce-enable-sanitizer", *link_arch_flags]
 
@@ -339,6 +320,12 @@ class BishengBuildExt(build_ext):
             "-ltiling_api",
             "-lplatform",
         ]
+        if ext_name in ("flash_attn_npu_3.flash_attn_npu_3", "flash_attn_npu_4.flash_attn_npu_4"):
+            # Scope is thread-local and active only around MLA's ASC launch.
+            # CANN 9.2.0's ASC launcher emits aclrtLaunchKernelWithArgsArray;
+            # CANN 9.0/9.1 emitted aclrtLaunchKernelWithHostArgs. Wrap both.
+            link_flags.append("-Wl,--wrap=aclrtLaunchKernelWithHostArgs")
+            link_flags.append("-Wl,--wrap=aclrtLaunchKernelWithArgsArray")
 
         # NOTE: ccache is intentionally NOT supported. bisheng requires `-x asc`
         # to enter ASC/device-compile mode (without it, kernel_operator.h and the
@@ -363,18 +350,18 @@ class BishengBuildExt(build_ext):
             # --cce-enable-sanitizer 开启内存异常检测插桩。
             compile_common += ["-g", "--cce-enable-sanitizer"]
             print(
-                f"[mssanitizer] {ext_name}: 已启用静态插桩 -g --cce-enable-sanitizer；"
-                f"必须通过检测运行时启动：mssanitizer --tool=memcheck -- python -m pytest ...；"
-                f"图捕获检测请使用 FLASH_ATTN_MSSANITIZER_MODE=runtime 重新构建"
+                f"[mssanitizer] {ext_name}: 已追加 -g（报告定位信息）；"
+                f"内存检测请用运行时注入：mssanitizer --tool=memcheck python -m pytest ..."
             )
         elif ENABLE_MSSANITIZER:
-            # Runtime instrumentation: retain symbols and avoid jump tables.
-            # Do not link static stubs, which cannot initialize during capture.
+            # 950 (dav-3510)：静态插桩 "--cce-enable-sanitizer" 在此 CANN 下不可用
+            # （缺少 libsanitizer_stub_dav-c310，链接阶段报 unable to find library），
+            # 内存检测改由 mssanitizer 运行时注入完成，无需重新编译算子；
+            # 这里仍追加 "-g"，让运行时注入的异常报告能输出文件名/行号/调用栈。
             compile_common += ["-g", "-fno-jump-tables"]
             print(
-                f"[mssanitizer] {ext_name}: 运行时插桩模式，已追加 -g -fno-jump-tables；"
-                f"内存检测请用：mssanitizer --tool=memcheck -- python -m pytest ...；"
-                f"图回放成功不代表图内 kernel 已被检测，请核对检测日志与越界对照"
+                f"[mssanitizer] {ext_name}: 已追加 -g（报告定位信息）；"
+                f"内存检测请用运行时注入：mssanitizer --tool=memcheck python -m pytest ..."
             )
 
         self._toolchains[ext_name] = (compiler, compile_common, link_arch_flags, link_flags)
@@ -386,7 +373,7 @@ class BishengBuildExt(build_ext):
             or os.getenv("FLASH_ATTN_FORCE_REBUILD", "FALSE") == "TRUE"
         )
 
-    def _build_aicpu_metadata(self, ext_fullpath, ext_name):
+    def _build_aicpu_metadata(self, ext_fullpath, ext_name, source="fa_metadata.aicpu"):
         """Compile fa_metadata.aicpu (host AICPU object) for the extensions
         that carry the scheduler-metadata feature (910 v2/v3/v4 and 950 v3/v4). This
         is a separate `bisheng -x aicpu` invocation (host CPU code
@@ -412,7 +399,7 @@ class BishengBuildExt(build_ext):
         src_dir = aicpu_src_dirs.get(ext_name)
         if src_dir is None:
             return None
-        aicpu_src = os.path.join(src_dir, "fa_metadata.aicpu")
+        aicpu_src = os.path.join(src_dir, source)
         if not os.path.exists(aicpu_src):
             return None
         aicpu_obj = os.path.join(
@@ -420,7 +407,7 @@ class BishengBuildExt(build_ext):
             # All extensions share the build output directory.  Keep the
             # AICPU objects per extension; otherwise the later 950 build
             # overwrites the object already queued for the earlier one.
-            f"fa_metadata_{ext_name.replace('.', '_')}.o",
+            f"{Path(source).stem}_{ext_name.replace('.', '_')}.o",
         )
         # Incremental AICPU compilation must also track the local headers. In
         # particular, fa_metadata.aicpu includes tilingdata.h and metadata
@@ -432,6 +419,12 @@ class BishengBuildExt(build_ext):
             header = os.path.join(src_dir, name)
             if os.path.exists(header):
                 aicpu_inputs.append(header)
+        if source.startswith("mla/"):
+            # MLA AICPU includes the shared scheduler sources as well as headers.
+            mla_dir = Path(src_dir) / "mla"
+            aicpu_inputs.extend(mla_dir.glob("*.h"))
+            aicpu_inputs.extend(mla_dir.glob("*.cpp"))
+            aicpu_inputs.append(__file__)
         expected_signature = _inputs_signature(aicpu_inputs)
         try:
             with open(aicpu_stamp) as stamp:
@@ -461,6 +454,10 @@ class BishengBuildExt(build_ext):
             "-D_FORTIFY_SOURCE=2",
             "-D_GNU_SOURCE",
             f"-I{aicpu_inc}",
+            # utils/log/asc_cpu_log.h (ASC_CPU_LOG_*)
+            f"-I{os.path.join(ascend_home, cann_arch_dir, 'asc/include')}",
+            # aicpu/cust_cpu_utils.h
+            f"-I{os.path.join(ascend_home, cann_arch_dir, 'include')}",
             f"-I{src_dir}",  # tilingdata.h
             f"--cce-aicpu-L{aicpu_lib}",
             "--cce-aicpu-laicpu_api",
@@ -516,7 +513,20 @@ class BishengBuildExt(build_ext):
             _compiler, compile_common, _la, _lf = toolchains[ext_name]
             depfile = obj + ".d"
             cmdhash_file = obj + ".cmdhash"
-            if not force and _obj_is_fresh(obj, src, depfile, cmdhash_file, compile_common):
+            mla_device = ext_name in (
+                "flash_attn_npu_3.flash_attn_npu_3",
+                "flash_attn_npu_4.flash_attn_npu_4",
+            ) and os.path.basename(src).startswith("mla_dispatch_")
+            device_depfile = obj + ".device.d"
+            device_fresh = not mla_device or (
+                os.path.exists(device_depfile)
+                and _obj_is_fresh(obj, src, device_depfile, cmdhash_file, compile_common)
+            )
+            if (
+                not force
+                and device_fresh
+                and _obj_is_fresh(obj, src, depfile, cmdhash_file, compile_common)
+            ):
                 print("[compile-skip]", ext_name, os.path.basename(src), "(obj up-to-date)")
                 return (ext_name, obj)
             cmd = [*compile_common, "-c", src, "-o", obj, "-MMD", "-MF", depfile]
@@ -526,6 +536,19 @@ class BishengBuildExt(build_ext):
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 if result.stdout:
                     print(result.stdout)
+                if mla_device:
+                    # Bisheng's final host pass overwrites -MMD and omits headers
+                    # under __NPU_ARCH__. Track the actual device include graph.
+                    deps_cmd = [
+                        *compile_common,
+                        "--offload-device-only",
+                        "-M",
+                        src,
+                        "-MF",
+                        device_depfile,
+                    ]
+                    print("[device-deps-cmd]", " ".join(deps_cmd))
+                    subprocess.run(deps_cmd, capture_output=True, text=True, check=True)
                 with open(cmdhash_file, "w") as f:
                     f.write(_cmdhash(compile_common))
                 return (ext_name, obj)
@@ -534,9 +557,7 @@ class BishengBuildExt(build_ext):
                 raise
 
         # One shared pool across all extensions so the heaviest TUs compile
-        # concurrently regardless of which extension owns them. TUs per extension
-        # once autogen dispatch TUs are added: ascend910_v2=12, ascend910_v3=9,
-        # ascend950_v3=6, ascend910_v4=5, ascend950_v4=6.
+        # concurrently regardless of which extension owns them.
         max_workers = min(len(tasks), os.cpu_count() or 1)
         objs_by_ext = {ext.name: [] for ext in self.extensions}
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -554,6 +575,14 @@ class BishengBuildExt(build_ext):
             aicpu_obj = self._build_aicpu_metadata(ext_fullpath, ext.name)
             if aicpu_obj is not None:
                 objs_by_ext[ext.name].append(aicpu_obj)
+            if ext.name in (
+                "flash_attn_npu_3.flash_attn_npu_3",
+                "flash_attn_npu_4.flash_attn_npu_4",
+            ):
+                for source in ("mla/mla_metadata.aicpu",):
+                    objs_by_ext[ext.name].append(
+                        self._build_aicpu_metadata(ext_fullpath, ext.name, source)
+                    )
 
         # Link each extension from its own object files (serial; link is cheap
         # relative to compile - measured ~1s/ext - so parallelizing would save
@@ -664,6 +693,20 @@ src_ascend910_v3 += glob.glob(
 src_ascend910_v3 += glob.glob(
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3", "combine_kernel.cpp"), recursive=True
 )
+# MLA numerical instantiations are generated with the ordinary v3 dispatch.
+# These are host adapters/schedulers for the FP16/BF16 MLA path.
+src_ascend910_v3 += [
+    os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
+    for name in (
+        "mla_forward.cpp",
+        "mla_layout.cpp",
+        "mla_dispatch.cpp",
+        "mla_tiling.cpp",
+        "mla_split.cpp",
+        "cann_split_core.cpp",
+    )
+]
+
 src_ascend950_v3 = glob.glob(
     os.path.join(this_dir, "csrc/ascend950/flash_attn_npu_3", "flash_api.cpp"), recursive=True
 )
@@ -690,6 +733,19 @@ src_ascend910_v4 += glob.glob(
 src_ascend910_v4 += glob.glob(
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_4", "combine_kernel.cpp"), recursive=True
 )
+# MLA host adapters/schedulers for the FP16/BF16 MLA path (mirrors v3). The
+# numerical instantiations come from the generated mla_dispatch_* autogen TUs.
+src_ascend910_v4 += [
+    os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_4/mla", name)
+    for name in (
+        "mla_forward.cpp",
+        "mla_layout.cpp",
+        "mla_dispatch.cpp",
+        "mla_tiling.cpp",
+        "mla_split.cpp",
+        "cann_split_core.cpp",
+    )
+]
 src_ascend950_v4 = glob.glob(
     os.path.join(this_dir, "csrc/ascend950/flash_attn_npu_4", "flash_api.cpp"), recursive=True
 )
