@@ -142,16 +142,19 @@ grep -rh "ASCENDCKERNEL.*mla_metadata" ~/ascend/log/debug/device-*/
 
 如果不信任任何日志通道，最稳的做法是把值写进**已经分配好、宿主能读回**的缓冲区。
 
-本项目 `MlaRecordHeader` 末尾留有 `uint32_t reserved[3]`（words 29/30/31），宿主持有 `metadata` 张量，直接读即可：
+统一结构下 MLA 记录把 header 织进 `FAInferTilingData`，逻辑字 29/30/31（原 `reserved[3]`）已无落点。
+可用于调试的是 MLA 路径下**不被写入的 FA 区间**——`FAInferTilingData` 物理字 `44 ~ 593`
+（原 `coreInfo[25]` / `splitInfo[25]`）在 MLA 路径下恒为 0（`memset` 后无人再写）：
 
 ```cpp
-// AICPU 侧
-auto* out = reinterpret_cast<uint32_t*>(a.output);
-out[29] = a.context.batch;   // 调试值
+// AICPU 侧：写入物理字 44 起的空闲区
+auto* out = reinterpret_cast<uint32_t*>(a.metaOutAddr);
+out[44] = a.batch;   // 调试值
 ```
 
 ```python
-print(meta[:32].cpu().tolist()[29])   # 宿主侧读回
+# 宿主侧按 dword 读回（缓冲是 uint8）
+print(meta.view(torch.int32)[44].item())
 ```
 
 ---
@@ -194,7 +197,7 @@ AscendC::DumpAccChkPoint(tensor, index, countOff, dumpSize);
 | 文件类型 | 编译方式 | 可用 |
 | --- | --- | --- |
 | `mla_prefill_dispatch_impl.hpp` 等 ASC device 目标 | `bisheng -x asc` | `AscendC::*`、`DumpTensor`、`printf` |
-| `mla_metadata.aicpu` / `mla_metadata.cpp` | `bisheng -x aicpu` | 只有 AICPU 接口，**不能** include `kernel_operator.h` |
+| `fa_metadata.aicpu`（内含 `mla_metadata.cpp` / `mla_metadata_consumer.h` 等） | `bisheng -x aicpu` | 只有 AICPU 接口，**不能** include `kernel_operator.h` |
 
 判断方法：看 `setup.py` 里该源文件走的是 `compile_common`（`-x asc`）还是 `aicpu_cmd`（`-x aicpu`）。
 

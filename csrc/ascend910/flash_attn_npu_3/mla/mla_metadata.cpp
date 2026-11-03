@@ -13,25 +13,27 @@
 #include <vector>
 
 namespace flash_attn::mla {
-bool BuildNonquantMetadata(const MlaRecordArgs& a)
+bool BuildNonquantMetadata(const FAMetadataArgs& a)
 {
-    auto c = a.context;
+    auto c = MlaContextFromArgs(a);
     MlaLayout l{};
-    if (!MlaRecordLayout(c, l) || !a.output || a.output % 4 || a.words != l.words ||
-        a.words > (UINT64_MAX - a.output) / 4)
+    if (!MlaRecordLayout(c, l) || !a.metaOutAddr || a.metaOutAddr % 4)
         return false;
-    const uint64_t addresses[] = {a.cuQuery, a.cuKv, a.usedQuery, a.usedKv};
+    const uint64_t bytes = MlaUnifiedBytes(l);
+    if (a.metaOutAddr > UINT64_MAX - bytes)
+        return false;
+    const uint64_t addresses[] = {a.mlaCuQuery, a.mlaCuKv, a.mlaUsedQuery, a.mlaUsedKv};
     for (uint32_t axis = 0; axis < 4; ++axis) {
         const uint64_t address = addresses[axis], count = uint64_t(c.batch) + (axis < 2);
-        if (address && count && address < a.output + uint64_t(a.words) * 4 &&
-            (address >= a.output || count > (a.output - address) / 4))
+        if (address && count && address < a.metaOutAddr + bytes &&
+            (address >= a.metaOutAddr || count > (a.metaOutAddr - address) / 4))
             return false;
     }
-    auto* out = reinterpret_cast<uint32_t*>(a.output);
-    std::fill(out, out + a.words, 0);
-    out[0] = a.words;
-    out[1] = c.dtype;
-    out[2] = 1;
+    auto* out = reinterpret_cast<uint32_t*>(a.metaOutAddr);
+    std::memset(out, 0, bytes);
+    out[kMlaUnifiedHeaderSlot[0]] = l.words;
+    out[kMlaUnifiedHeaderSlot[1]] = c.dtype;
+    out[kMlaUnifiedHeaderSlot[2]] = 1;
     for (uint32_t axis = 0; axis < 4; ++axis) {
         const uint64_t address = addresses[axis], count = uint64_t(c.batch) + (axis < 2);
         const bool required = axis == 0 ? MlaTnd(c) : axis == 1 ? c.layout == 1 : c.usedFlags & (1U << (axis - 2));
@@ -40,10 +42,10 @@ bool BuildNonquantMetadata(const MlaRecordArgs& a)
             return true;
     }
     if ((c.dtype != uint32_t(MlaMetadataDtype::Fp16) && c.dtype != uint32_t(MlaMetadataDtype::Bf16)) ||
-        a.inferTotalQ > 1 || (a.inferTotalQ && c.layout != 2 && c.layout != 4))
+        a.mlaInferTotalQ > 1 || (a.mlaInferTotalQ && c.layout != 2 && c.layout != 4))
         return true;
-    if (a.inferTotalQ) {
-        c.totalQ = reinterpret_cast<const uint32_t*>(a.cuQuery)[c.batch];
+    if (a.mlaInferTotalQ) {
+        c.totalQ = reinterpret_cast<const uint32_t*>(a.mlaCuQuery)[c.batch];
         if (!MlaRecordLayout(c, l))
             return true;
     }
@@ -101,11 +103,9 @@ bool BuildNonquantMetadata(const MlaRecordArgs& a)
                                  {c.packed, c.margin}, physical, native) != MlaScheduleStatus::Success)
                 return true;
         }
-        std::vector<uint32_t> result(l.words, 0);
-        const auto header = MlaHeader(c, l, queryCapacity, kvCapacity);
-        std::memcpy(result.data(), &header, sizeof(header));
-        auto* tail = result.data() + MlaTail(c);
-        auto* prefix = tail + kMlaNativePartitionWords;
+        auto* tiling = reinterpret_cast<FAInferTilingData*>(a.metaOutAddr);
+        auto* tail = out + kMlaUnifiedFixedWords;
+        auto* prefix = tail + kMlaSequenceWords * c.batch;
         uint64_t groups = 0;
         for (uint32_t b = 0; b < c.batch; ++b) {
             const auto& s = lengths.sequences[b];
@@ -113,7 +113,7 @@ bool BuildNonquantMetadata(const MlaRecordArgs& a)
                                      uint32_t(s.kvStart),    uint32_t(s.kvStart >> 32),
                                      s.queryCapacity,        s.kvCapacity,
                                      s.queryLength,          s.kvLength};
-            std::copy(span, span + 8, result.begin() + MlaSequenceWord(b));
+            std::copy(span, span + 8, tail + kMlaSequenceWords * b);
             const uint64_t count = (uint64_t(s.queryLength) * l.g + l.m - 1) / l.m;
             for (uint32_t h = 0; h < l.headGroups; ++h) {
                 groups += count;
@@ -122,7 +122,7 @@ bool BuildNonquantMetadata(const MlaRecordArgs& a)
                 prefix[1] = uint32_t(groups >> 32);
             }
         }
-        MlaNativePartition partition{};
+        MlaCorePartition partition{};
         partition.mask = c.window.kind;
         partition.left = uint32_t(c.window.left);
         partition.right = uint32_t(c.window.right);
@@ -145,8 +145,9 @@ bool BuildNonquantMetadata(const MlaRecordArgs& a)
         MLA_COPY_FIELD(vectorHeadEnd, gS1IdxEndOfFdHead);
         MLA_COPY_FIELD(vectorPartEnd, gS1IdxEndOfFdHeadSplit);
 #undef MLA_COPY_FIELD
-        std::memcpy(tail, &partition, sizeof(partition));
-        std::copy(result.begin(), result.end(), out);
+        std::memcpy(&tiling->mlaPartition, &partition, sizeof(partition));
+        // Written last: this clears the in-progress status word on success.
+        WriteMlaHeader(*tiling, MlaHeader(c, l, queryCapacity, kvCapacity));
     } catch (const std::bad_alloc&) {
     }
     return true;

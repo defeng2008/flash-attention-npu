@@ -10,6 +10,9 @@
 #include "mla_tiling.h"
 #include "mla_layout.h"
 #include "mla_params.h"
+// The unified scheduler-metadata structures. FA and MLA share one definition:
+// FAInferStaticTilingData (output record) and FAMetadataArgs (AICPU inputs).
+#include "../fa_metadata_args.h"
 #if defined(__CCE__)
 #define MLA_METADATA_INLINE inline[host, aicore]
 #else
@@ -60,37 +63,36 @@ struct MlaRecordHeader {
     uint32_t queryCapacity, kvCapacity, algorithm, reserved[3];
 };
 static_assert(sizeof(MlaRecordHeader) == 32 * sizeof(uint32_t));
-struct MlaNativePartition {
-    uint32_t mask, left, right, usedCoreNum;
-    uint32_t bEnd[26], mEnd[26], nEnd[26];
-    uint32_t fdHeads, maxSplits, vectors, fdRows;
-    uint32_t fdBatch[26], fdM[26], fdSplits[26], coreSplitStart[26], fdParts[26], fdLastRows[26];
-    uint32_t vectorHeadEnd[52], vectorPartEnd[52];
-};
-static_assert(sizeof(MlaNativePartition) == 346 * sizeof(uint32_t));
+// The MLA core partition lives in FAInferStaticTilingData (one definition). Its
+// field order is unchanged, so the word offsets below stay valid.
+static_assert(sizeof(MlaCorePartition) == 346 * sizeof(uint32_t));
 // Offsets name the source fields; consumers never infer a development format.
 enum MlaNativeWord : uint32_t {
-    kMlaNativeUsedCoreNum = offsetof(MlaNativePartition, usedCoreNum) / sizeof(uint32_t),
-    kMlaNativeBEnd = offsetof(MlaNativePartition, bEnd) / sizeof(uint32_t),
-    kMlaNativeMEnd = offsetof(MlaNativePartition, mEnd) / sizeof(uint32_t),
-    kMlaNativeNEnd = offsetof(MlaNativePartition, nEnd) / sizeof(uint32_t),
-    kMlaNativeFdHeads = offsetof(MlaNativePartition, fdHeads) / sizeof(uint32_t),
-    kMlaNativeMaxSplits = offsetof(MlaNativePartition, maxSplits) / sizeof(uint32_t),
-    kMlaNativeVectors = offsetof(MlaNativePartition, vectors) / sizeof(uint32_t),
-    kMlaNativeFdRows = offsetof(MlaNativePartition, fdRows) / sizeof(uint32_t),
-    kMlaNativeFdBatch = offsetof(MlaNativePartition, fdBatch) / sizeof(uint32_t),
-    kMlaNativeFdM = offsetof(MlaNativePartition, fdM) / sizeof(uint32_t),
-    kMlaNativeFdSplits = offsetof(MlaNativePartition, fdSplits) / sizeof(uint32_t),
-    kMlaNativeCoreSplitStart = offsetof(MlaNativePartition, coreSplitStart) / sizeof(uint32_t),
-    kMlaNativeFdParts = offsetof(MlaNativePartition, fdParts) / sizeof(uint32_t),
-    kMlaNativeFdLastRows = offsetof(MlaNativePartition, fdLastRows) / sizeof(uint32_t),
-    kMlaNativeVectorHeadEnd = offsetof(MlaNativePartition, vectorHeadEnd) / sizeof(uint32_t),
-    kMlaNativeVectorPartEnd = offsetof(MlaNativePartition, vectorPartEnd) / sizeof(uint32_t),
+    kMlaNativeUsedCoreNum = offsetof(MlaCorePartition, usedCoreNum) / sizeof(uint32_t),
+    kMlaNativeBEnd = offsetof(MlaCorePartition, bEnd) / sizeof(uint32_t),
+    kMlaNativeMEnd = offsetof(MlaCorePartition, mEnd) / sizeof(uint32_t),
+    kMlaNativeNEnd = offsetof(MlaCorePartition, nEnd) / sizeof(uint32_t),
+    kMlaNativeFdHeads = offsetof(MlaCorePartition, fdHeads) / sizeof(uint32_t),
+    kMlaNativeMaxSplits = offsetof(MlaCorePartition, maxSplits) / sizeof(uint32_t),
+    kMlaNativeVectors = offsetof(MlaCorePartition, vectors) / sizeof(uint32_t),
+    kMlaNativeFdRows = offsetof(MlaCorePartition, fdRows) / sizeof(uint32_t),
+    kMlaNativeFdBatch = offsetof(MlaCorePartition, fdBatch) / sizeof(uint32_t),
+    kMlaNativeFdM = offsetof(MlaCorePartition, fdM) / sizeof(uint32_t),
+    kMlaNativeFdSplits = offsetof(MlaCorePartition, fdSplits) / sizeof(uint32_t),
+    kMlaNativeCoreSplitStart = offsetof(MlaCorePartition, coreSplitStart) / sizeof(uint32_t),
+    kMlaNativeFdParts = offsetof(MlaCorePartition, fdParts) / sizeof(uint32_t),
+    kMlaNativeFdLastRows = offsetof(MlaCorePartition, fdLastRows) / sizeof(uint32_t),
+    kMlaNativeVectorHeadEnd = offsetof(MlaCorePartition, vectorHeadEnd) / sizeof(uint32_t),
+    kMlaNativeVectorPartEnd = offsetof(MlaCorePartition, vectorPartEnd) / sizeof(uint32_t),
 };
 
 constexpr uint32_t kMlaRecordHeaderWords = sizeof(MlaRecordHeader) / 4;
 constexpr uint32_t kMlaSequenceWords = 8;
-constexpr uint32_t kMlaNativePartitionWords = sizeof(MlaNativePartition) / 4;
+constexpr uint32_t kMlaNativePartitionWords = sizeof(MlaCorePartition) / 4;
+// The unified record is FAInferStaticTilingData followed by a variable tail region.
+constexpr uint32_t kMlaUnifiedFixedWords = kFaInferTilingBytes / 4;
+// Word slot of the embedded MlaCorePartition inside FAInferStaticTilingData.
+constexpr uint32_t kMlaUnifiedPartitionWord = offsetof(FAInferStaticTilingData, mlaPartition) / sizeof(uint32_t);
 MLA_METADATA_INLINE bool MlaTnd(const MlaContext& c)
 {
     return c.layout == 1 || c.layout == 2 || c.layout == 4;
@@ -232,14 +234,183 @@ MLA_METADATA_INLINE MlaRecordHeader MlaHeader(const MlaContext& c, const MlaLayo
             0,
             {0, 0, 0}};
 }
-struct MlaRecordArgs {
-    MlaContext context;
-    uint64_t cuQuery = 0, cuKv = 0, usedQuery = 0, usedKv = 0, output = 0;
-    uint32_t words = 0, inferTotalQ = 0;
-    uint64_t checked = 0;
-    MlaPagedCacheInputs cache{};
-    bool generate = true;
+// ---- unified record <-> FAInferStaticTilingData mapping (see docs §10) ----
+// Logical header word -> word slot inside FAInferStaticTilingData. Words 29..31
+// are reserved zeros and have no slot. FA4 keeps mask/window in
+// FAInferRuntimeData, so words 19..21 map to the dedicated MLA static fields.
+constexpr uint32_t kMlaUnifiedHeaderSlot[kMlaRecordHeaderWords] = {
+    offsetof(FAInferStaticTilingData, mlaWords) / 4,
+    offsetof(FAInferStaticTilingData, mlaDtype) / 4,
+    offsetof(FAInferStaticTilingData, mlaStatus) / 4,
+    offsetof(FAInferStaticTilingData, batch) / 4,
+    offsetof(FAInferStaticTilingData, maxQSeqlen) / 4,
+    offsetof(FAInferStaticTilingData, maxKvSeqlen) / 4,
+    offsetof(FAInferStaticTilingData, numHeads) / 4,
+    offsetof(FAInferStaticTilingData, kvHeads) / 4,
+    offsetof(FAInferStaticTilingData, numSplits) / 4,
+    offsetof(FAInferStaticTilingData, mlaPhysicalCores) / 4,
+    offsetof(FAInferStaticTilingData, mlaMargin) / 4,
+    offsetof(FAInferStaticTilingData, mlaPacked) / 4,
+    offsetof(FAInferStaticTilingData, mlaLayout) / 4,
+    offsetof(FAInferStaticTilingData, mlaTotalQ) / 4,
+    offsetof(FAInferStaticTilingData, mlaTotalK) / 4,
+    offsetof(FAInferStaticTilingData, mlaPageSize) / 4,
+    offsetof(FAInferStaticTilingData, mlaUsedFlags) / 4,
+    offsetof(FAInferStaticTilingData, mlaValueDim) / 4,
+    offsetof(FAInferStaticTilingData, mlaHasSoftcap) / 4,
+    offsetof(FAInferStaticTilingData, mlaMask) / 4,
+    offsetof(FAInferStaticTilingData, mlaLeft) / 4,
+    offsetof(FAInferStaticTilingData, mlaRight) / 4,
+    offsetof(FAInferStaticTilingData, mlaM) / 4,
+    offsetof(FAInferStaticTilingData, mlaN) / 4,
+    offsetof(FAInferStaticTilingData, mlaCores) / 4,
+    offsetof(FAInferStaticTilingData, mlaHeadGroups) / 4,
+    offsetof(FAInferStaticTilingData, mlaQueryCapacity) / 4,
+    offsetof(FAInferStaticTilingData, mlaKvCapacity) / 4,
+    offsetof(FAInferStaticTilingData, mlaAlgorithm) / 4,
+    UINT32_MAX,
+    UINT32_MAX,
+    UINT32_MAX,
 };
-bool BuildNonquantMetadata(const MlaRecordArgs&);
+// Physical word slot of a logical record word inside the unified buffer. This
+// single mapping keeps every reader (AIC and AICPU) agnostic of the split
+// between the fixed FAInferStaticTilingData record and its variable tail.
+MLA_METADATA_INLINE uint32_t MlaUnifiedSlot(uint32_t batch, uint64_t word)
+{
+    const uint32_t spanEnd = kMlaRecordHeaderWords + kMlaSequenceWords * batch;
+    if (word < kMlaRecordHeaderWords) {
+        const uint32_t slot = kMlaUnifiedHeaderSlot[word];
+        return slot == UINT32_MAX ? 0 : slot;
+    }
+    if (word < spanEnd)
+        return kMlaUnifiedFixedWords + (word - kMlaRecordHeaderWords);
+    if (word < spanEnd + kMlaNativePartitionWords)
+        return kMlaUnifiedPartitionWord + (word - spanEnd);
+    return kMlaUnifiedFixedWords + kMlaSequenceWords * batch + (word - spanEnd - kMlaNativePartitionWords);
+}
+// Variable tail words after the fixed record: per-batch spans + wide prefixes.
+MLA_METADATA_INLINE uint32_t MlaUnifiedTailWords(const MlaLayout& l)
+{
+    return l.words - kMlaRecordHeaderWords - kMlaNativePartitionWords;
+}
+MLA_METADATA_INLINE uint64_t MlaUnifiedBytes(const MlaLayout& l)
+{
+    return kFaInferTilingBytes + 4ULL * MlaUnifiedTailWords(l);
+}
+MLA_METADATA_INLINE void WriteMlaHeader(FAInferStaticTilingData& t, const MlaRecordHeader& header)
+{
+    const auto* source = reinterpret_cast<const uint32_t*>(&header);
+    auto* destination = reinterpret_cast<uint32_t*>(&t);
+    for (uint32_t i = 0; i < kMlaRecordHeaderWords; ++i)
+        if (kMlaUnifiedHeaderSlot[i] != UINT32_MAX)
+            destination[kMlaUnifiedHeaderSlot[i]] = source[i];
+}
+// Rebuild the invocation geometry from the unified AICPU inputs.
+MLA_METADATA_INLINE MlaContext MlaContextFromArgs(const FAMetadataArgs& a)
+{
+    MlaContext c{};
+    c.batch = a.batch;
+    c.sq = a.maxQSeqlen;
+    c.sk = a.mlaMaxKv;
+    c.heads = a.numHeads;
+    c.kvHeads = a.numHeadsK;
+    c.splits = a.numSplits;
+    c.dtype = a.mlaDtype;
+    c.physicalCores = a.blockDim;
+    c.margin = a.mlaMargin;
+    c.packed = a.mlaPacked;
+    c.layout = a.mlaLayoutCode;
+    c.totalQ = a.mlaTotalQ;
+    c.totalK = a.mlaTotalK;
+    c.pageSize = a.mlaPageSize;
+    c.usedFlags = a.mlaUsedFlags;
+    c.valueDim = a.embeddingSizeV;
+    c.hasSoftcap = a.mlaHasSoftcap;
+    // FA4 stores mask/left/right in the dedicated uint32 fields; sign-extend so
+    // negative window bounds (e.g. -1) survive the round trip.
+    c.window = {a.mlaMask, int64_t(int32_t(a.mlaLeft)), int64_t(int32_t(a.mlaRight))};
+    c.workspaceBytes = a.mlaWorkspaceBytes;
+    return c;
+}
+MLA_METADATA_INLINE MlaPagedCacheInputs MlaPagedCacheInputsFromArgs(const FAMetadataArgs& a)
+{
+    MlaPagedCacheInputs cache{};
+    // pageSize is not carried separately; CheckPagedCacheDescriptor pins it to
+    // the context page size, so rebuilding from the context is equivalent.
+    cache.layout.batchSize = a.mlaCacheBatchSize;
+    cache.layout.maxPages = a.mlaCacheMaxPages;
+    cache.layout.logicalCapacity = a.mlaCacheLogicalCapacity;
+    cache.layout.physicalPages = a.mlaCachePhysicalPages;
+    cache.layout.pageSize = a.mlaPageSize;
+    cache.layout.tableRowStride = a.mlaCacheTableRowStride;
+    cache.layout.tableSpanElements = a.mlaCacheTableSpanElements;
+    cache.layout.k = {a.mlaCacheKBatchStride, a.mlaCacheKRowStride, a.mlaCacheKHeadStride, a.mlaCacheKSpanElements};
+    cache.layout.v = {a.mlaCacheVBatchStride, a.mlaCacheVRowStride, a.mlaCacheVHeadStride, a.mlaCacheVSpanElements};
+    cache.table = {a.mlaCacheTableAddr, a.mlaCacheTableCount};
+    cache.k = {a.mlaCacheKAddr, a.mlaCacheKCount};
+    cache.v = {a.mlaCacheVAddr, a.mlaCacheVCount};
+    return cache;
+}
+// Host-side counterpart: flatten the validated context and launch data.
+MLA_METADATA_INLINE void FillMlaArgs(FAMetadataArgs& a, const MlaContext& c, uint32_t queryDim, uint64_t output,
+                                     uint64_t cuQuery, uint64_t cuKv, uint64_t usedQuery, uint64_t usedKv,
+                                     uint64_t checked, uint32_t inferTotalQ, bool generate,
+                                     const MlaPagedCacheInputs& cache)
+{
+    a = FAMetadataArgs{};
+    a.metaOutAddr = output;
+    a.embeddingSize = queryDim;
+    a.embeddingSizeV = c.valueDim;
+    a.batch = c.batch;
+    a.numHeads = c.heads;
+    a.numHeadsK = c.kvHeads;
+    a.maxQSeqlen = c.sq;
+    a.blockDim = c.physicalCores;
+    a.isVarlen = uint32_t(MlaTnd(c));
+    a.isVarlenKv = uint32_t(c.layout == 1);
+    a.numSplits = c.splits;
+    a.mlaMask = c.window.kind;
+    a.mlaLeft = uint32_t(c.window.left);
+    a.mlaRight = uint32_t(c.window.right);
+    a.mlaCuQuery = cuQuery;
+    a.mlaCuKv = cuKv;
+    a.mlaUsedQuery = usedQuery;
+    a.mlaUsedKv = usedKv;
+    a.mlaChecked = checked;
+    a.mlaWorkspaceBytes = c.workspaceBytes;
+    a.mlaLayoutCode = c.layout;
+    a.mlaTotalQ = c.totalQ;
+    a.mlaTotalK = c.totalK;
+    a.mlaPageSize = c.pageSize;
+    a.mlaUsedFlags = c.usedFlags;
+    a.mlaMaxKv = c.sk;
+    a.mlaPacked = c.packed;
+    a.mlaMargin = c.margin;
+    a.mlaInferTotalQ = inferTotalQ;
+    a.mlaGenerate = uint32_t(generate);
+    a.mlaDtype = c.dtype;
+    a.mlaHasSoftcap = c.hasSoftcap;
+    a.mlaCacheBatchSize = uint32_t(cache.layout.batchSize);
+    a.mlaCacheMaxPages = uint32_t(cache.layout.maxPages);
+    a.mlaCacheLogicalCapacity = uint32_t(cache.layout.logicalCapacity);
+    a.mlaCachePhysicalPages = uint32_t(cache.layout.physicalPages);
+    a.mlaCacheTableAddr = cache.table.address;
+    a.mlaCacheTableCount = cache.table.count;
+    a.mlaCacheTableRowStride = cache.layout.tableRowStride;
+    a.mlaCacheTableSpanElements = cache.layout.tableSpanElements;
+    a.mlaCacheKAddr = cache.k.address;
+    a.mlaCacheKCount = cache.k.count;
+    a.mlaCacheKBatchStride = cache.layout.k.batchStride;
+    a.mlaCacheKRowStride = cache.layout.k.rowStride;
+    a.mlaCacheKHeadStride = cache.layout.k.headStride;
+    a.mlaCacheKSpanElements = cache.layout.k.spanElements;
+    a.mlaCacheVAddr = cache.v.address;
+    a.mlaCacheVCount = cache.v.count;
+    a.mlaCacheVBatchStride = cache.layout.v.batchStride;
+    a.mlaCacheVRowStride = cache.layout.v.rowStride;
+    a.mlaCacheVHeadStride = cache.layout.v.headStride;
+    a.mlaCacheVSpanElements = cache.layout.v.spanElements;
+}
+bool BuildNonquantMetadata(const FAMetadataArgs&);
 } // namespace flash_attn::mla
 #undef MLA_METADATA_INLINE

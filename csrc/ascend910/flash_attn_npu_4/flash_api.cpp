@@ -1411,18 +1411,16 @@ std::vector<at::Tensor> fa_fwd(
     float softcap, int64_t num_splits, std::optional<bool> pack_gqa_, std::optional<at::Tensor> learnable_sink_,
     std::optional<at::Tensor> scheduler_metadata_, int64_t sm_margin, int64_t layout)
 {
-    // gather_kv_indices is unsupported for every FA4 forward, including MLA.
-    TORCH_CHECK(!gather_kv_indices_.has_value(), "NPU FlashAttention does not support gather_kv_indices");
     if (IsMlaForward(q, v, q_v_)) {
-        if (auto result = flash_attn::mla::mla_fwd(
+        auto result = flash_attn::mla::mla_fwd(
                 q, k, v, std::nullopt, std::nullopt, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, std::nullopt, seqused_q_,
                 seqused_k_, max_seqlen_q_, max_seqlen_k_, page_table_, std::nullopt, std::nullopt, std::nullopt,
                 std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
                 softmax_scale_ ? std::optional<double>(static_cast<double>(*softmax_scale_)) : std::nullopt, is_causal,
                 window_size_left, window_size_right, 0, static_cast<double>(softcap), true, scheduler_metadata_,
-                num_splits, pack_gqa_, sm_margin, layout)) {
-            return std::move(*result);
-        }
+                num_splits, pack_gqa_, sm_margin, layout);
+        TORCH_CHECK(result.has_value(), "MLA: unsupported input for the MLA shape signature");
+        return std::move(*result);
     }
     return mha_fwd(q, k, v, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, seqused_q_, seqused_k_, max_seqlen_q_,
                    max_seqlen_k_, min_seqlen_k_, page_table_, gather_kv_indices_, softmax_scale_, is_causal,

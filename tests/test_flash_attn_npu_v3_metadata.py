@@ -1975,7 +1975,7 @@ def test_metadata_fake_without_device_runtime(monkeypatch, symbolic):
         lengths = torch.empty(2, dtype=torch.int32, device="npu")
         max_q = mode.shape_env.create_unbacked_symint() if symbolic else 16
         record = get_scheduler_metadata(2, max_q, 128, 4, 1, 64, lengths, num_splits=1)
-        assert record.shape == (2376,)
+        assert record.shape == (3840,)
         assert record.dtype == torch.uint8 and record.device == lengths.device
 
 

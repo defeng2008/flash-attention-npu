@@ -419,8 +419,9 @@ class BishengBuildExt(build_ext):
             header = os.path.join(src_dir, name)
             if os.path.exists(header):
                 aicpu_inputs.append(header)
-        if source.startswith("mla/"):
-            # MLA AICPU includes the shared scheduler sources as well as headers.
+        if source.startswith("mla/") or source == "fa_metadata.aicpu":
+            # The unified AICPU unit also compiles the shared MLA scheduler
+            # sources and headers.
             mla_dir = Path(src_dir) / "mla"
             aicpu_inputs.extend(mla_dir.glob("*.h"))
             aicpu_inputs.extend(mla_dir.glob("*.cpp"))
@@ -569,20 +570,14 @@ class BishengBuildExt(build_ext):
         # AICPU metadata object for the extensions carrying the
         # scheduler-metadata feature: compiled separately (host code,
         # `bisheng -x aicpu`) and appended to each extension's link set. Built
-        # after the parallel ASC compiles, before linking.
+        # after the parallel ASC compiles, before linking. FA and MLA share this
+        # single object; it exposes both ComputeFAMetadataV3 and
+        # ComputeMlaMetadata.
         for ext in self.extensions:
             ext_fullpath = self.get_ext_fullpath(ext.name)
             aicpu_obj = self._build_aicpu_metadata(ext_fullpath, ext.name)
             if aicpu_obj is not None:
                 objs_by_ext[ext.name].append(aicpu_obj)
-            if ext.name in (
-                "flash_attn_npu_3.flash_attn_npu_3",
-                "flash_attn_npu_4.flash_attn_npu_4",
-            ):
-                for source in ("mla/mla_metadata.aicpu",):
-                    objs_by_ext[ext.name].append(
-                        self._build_aicpu_metadata(ext_fullpath, ext.name, source)
-                    )
 
         # Link each extension from its own object files (serial; link is cheap
         # relative to compile - measured ~1s/ext - so parallelizing would save
@@ -600,6 +595,12 @@ class BishengBuildExt(build_ext):
                 for name in ("tilingdata.h", "fa_metadata_args.h")
                 if os.path.exists(os.path.join(os.path.dirname(src), name))
             )
+            # The shared scheduler-metadata headers and sources feed the MLA
+            # device paths, so a change must relink the extension.
+            mla_dirs = {Path(src).parent / "mla" for src in ext.sources}
+            for mla_dir in mla_dirs:
+                link_inputs.extend(mla_dir.glob("*.h"))
+                link_inputs.extend(mla_dir.glob("*.cpp"))
             expected_link_signature = _inputs_signature(link_inputs)
             try:
                 with open(link_stamp) as stamp:

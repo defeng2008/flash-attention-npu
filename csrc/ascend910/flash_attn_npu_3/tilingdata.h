@@ -7,6 +7,7 @@
 #ifndef FLASH_ATTENTION_REGULAR_H
 #define FLASH_ATTENTION_REGULAR_H
 
+#include <cstddef>
 #include <cstdint>
 
 struct coreNode {
@@ -31,6 +32,16 @@ struct splitNode {
     int splitNum;
     int64_t lseTaskOffset;
     int64_t oTaskOffset;
+};
+
+// MLA core partition, appended to FAInferTilingData. Field order is identical
+// to the former MlaNativePartition so consumer word offsets stay valid.
+struct MlaCorePartition {
+    uint32_t mask, left, right, usedCoreNum;
+    uint32_t bEnd[26], mEnd[26], nEnd[26];
+    uint32_t fdHeads, maxSplits, vectors, fdRows;
+    uint32_t fdBatch[26], fdM[26], fdSplits[26], coreSplitStart[26], fdParts[26], fdLastRows[26];
+    uint32_t vectorHeadEnd[52], vectorPartEnd[52];
 };
 
 struct FAInferTilingData {
@@ -68,6 +79,14 @@ struct FAInferTilingData {
     uint32_t kvCacheSeqlen;
     coreNode coreInfo[25];
     splitNode splitInfo[25];
+
+    // ---- appended MLA schedule (all zero for ordinary FA) ----
+    // Words 3..8 of the MLA header reuse batch/maxQSeqlen/maxKvSeqlen/numHeads/
+    // kvHeads/numSplits; words 19..21 reuse maskType/windowSizeLeft/Right.
+    uint32_t mlaWords, mlaDtype, mlaStatus, mlaLayout, mlaPacked, mlaMargin, mlaPhysicalCores;
+    uint32_t mlaTotalQ, mlaTotalK, mlaPageSize, mlaUsedFlags, mlaValueDim, mlaHasSoftcap;
+    uint32_t mlaM, mlaN, mlaCores, mlaHeadGroups, mlaQueryCapacity, mlaKvCapacity, mlaAlgorithm;
+    MlaCorePartition mlaPartition;
 
     uint32_t get_numHeads() const
     {
@@ -312,6 +331,13 @@ struct FAInferTilingData {
         kvCacheSeqlen = value;
     }
 };
+
+// Pin the ABI: existing FA fields must not move, MLA payload length is fixed.
+static_assert(offsetof(FAInferTilingData, mlaWords) == 2376,
+              "MLA schedule must be appended without moving existing FA fields");
+static_assert(sizeof(MlaCorePartition) == 346 * sizeof(uint32_t), "MlaCorePartition layout changed");
+static_assert(sizeof(FAInferTilingData) == 3840, "FAInferTilingData ABI changed");
+constexpr uint64_t kFaInferTilingBytes = sizeof(FAInferTilingData);
 
 // Per-forward values accompany the reusable device tiling at kernel launch.
 struct FAInferTilingParams {

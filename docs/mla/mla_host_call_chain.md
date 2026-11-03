@@ -10,7 +10,7 @@
 - [flash_api.cpp](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)
 - [mla_forward.cpp](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp)
 - [mla_metadata.cpp](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.cpp)
-- [mla_metadata.aicpu](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu)
+- [fa_metadata.aicpu](../../csrc/ascend910/flash_attn_npu_3/fa_metadata.aicpu)（FA/MLA 共用的唯一 AICPU 编译单元）
 - [mla_dispatch.h](../../csrc/ascend910/flash_attn_npu_3/mla/mla_dispatch.h)
 - [mla_dispatch_impl.hpp](../../csrc/ascend910/flash_attn_npu_3/mla/mla_dispatch_impl.hpp)
 - [flash_attn_npu_interface.py](../../flash_attn_npu_3/flash_attn_npu_interface.py)
@@ -43,13 +43,13 @@ fa_fwd(...)                                   flash_api.cpp L1427
         │        │    └─ valueDim==512 时二次 MlaRecordLayout(c, small, 128, l.n) 反算最坏容量  L193-203
         │        │
         │        ├─③ 若用户传了 scheduler_metadata：
-        │        │    CheckMetadataTensor(*supplied, l.words)                              L255-256
-        │        ├─④ 分配输出 out / lse / accum / accumLse                                 L258-267
-        │        ├─⑤ 分配 workspace / metadata
+        │        │    CheckMetadataBuffer(*supplied, q.device(), MlaUnifiedBytes(l))        L255-256
+        ├─④ 分配输出 out / lse / accum / accumLse                                 L258-267
+        ├─⑤ 分配 workspace / metadata
         │        │    workspace = at::empty(checkedOffset + sizeof(MlaCheckedAutoSplitSchedule)
         │        │                            + platform.libApiWorkspaceBytes)             L271-273
-        │        │    metadata  = supplied ? *supplied : at::empty({l.words}, kInt)        L274
-        │        ├─⑥ 组装 MlaRecordArgs args（cuQ / cuK / usedQ / usedK / output / words）    L275-281
+        │        │    metadata  = supplied ? *supplied : at::empty({MlaUnifiedBytes(l)}, kByte) L274
+        ├─⑥ 组装 FAMetadataArgs args（FillMlaArgs：cuQ / cuK / usedQ / usedK / output / 缓存描述） L275-281
         │        ├─⑦ RecordInput(...) 逐张量登记到当前 stream                              L284-290
         │        ├─⑧ 组装 MlaLaunchArgs a（各 GM 指针、ffts、checked）                       L291-322
         │        │    a.workspace = workspace + platform.libApiWorkspaceBytes              L303
@@ -66,9 +66,9 @@ fa_fwd(...)                                   flash_api.cpp L1427
         │
         ▼  设备侧（同一 stream 顺序执行）
    ┌──────────────────────────────────────────────────────────────────────┐
-   │ AICPU  ComputeMlaMetadata            mla_metadata.aicpu L51-70       │
-   │   BuildNonquantMetadata(a)  ← args.generate 为假时跳过生成            │
-   │   CheckRecord(a, checked.schedule) → 写 a.checked                    │
+   │ AICPU  ComputeMlaMetadata            fa_metadata.aicpu             │
+   │   BuildNonquantMetadata(a)  ← args.mlaGenerate 为假时跳过生成         │
+   │   CheckRecord(a, checked.schedule) → 写 a.mlaChecked                 │
    │   （返回值 0/1 无人消费）                                             │
    └──────────────────────────────────────────────────────────────────────┘
    ┌──────────────────────────────────────────────────────────────────────┐
@@ -102,9 +102,9 @@ get_scheduler_metadata(...)                   flash_api.cpp L812
                 ├─② MakeContext(batch, sq, sk, ..., valueDim, layout,
                 │    totalQ=0, totalK=0, page, hasSoftcap, ...)                   L353-355
                 │    layout = page ? (cuQ ? 4 : 3) : (cuQ ? 2 : 0)
-                ├─③ metadata = at::empty({l.words}, lengths.options())             L356
-                ├─④ MlaRecordArgs args = {c, cuQ, 0, 0, lengths, metadata,
-                │    l.words, inferTotalQ = uint32_t(bool(cuQ))}                   L359-366
+                ├─③ metadata = at::empty({MlaUnifiedBytes(l)}, lengths.options().dtype(kByte))  L356
+                ├─④ FAMetadataArgs args；FillMlaArgs(..., inferTotalQ = uint32_t(bool(cuQ)),
+                │    generate = true, cache = {})                                    L359-366
                 ├─⑤ RecordInput(lengths / cuQ, stream)                            L368-370
                 └─⑥ OpCommand::RunOpApiV2("ascendc_mla_metadata", λ)               L371
                      └─ ComputeMlaMetadata<<<1, nullptr, stream>>>(&args, sizeof(args));  L372
@@ -114,9 +114,9 @@ get_scheduler_metadata(...)                   flash_api.cpp L812
                 │
                 ▼
         前向链 ⑦/⑧/⑨ 中 supplied != nullptr
-                → CheckMetadataTensor 校验 words 一致      L256
-                → metadata 直接复用 supplied               L274
-                → args.generate = false                    L311
+                → CheckMetadataBuffer 校验 MlaUnifiedBytes(l) 一致     L256
+                → metadata 直接复用 supplied                           L274
+                → args.mlaGenerate = false                             L311
                 → AICPU 只跑 CheckRecord，不再 BuildNonquantMetadata
 ```
 
@@ -131,11 +131,11 @@ get_scheduler_metadata(...)                   flash_api.cpp L812
 | `generate` | `!supplied`（有则跳过生成） | 恒 true（走默认值） |
 | `inferTotalQ` | 0（未设置） | `uint32_t(bool(cuQ))` |
 | `cuKv / usedQuery / usedKv` | 真实地址 | 恒 0 |
-| `checked` | 有（workspace 内偏移） | 无（`a.checked` 为空 → 跳过自校验） |
+| `checked` | 有（workspace 内偏移，写 `mlaChecked`） | 无（`mlaChecked` 为空 → 跳过自校验） |
 | 产出 | `out / lse / accum / accumLse` + metadata | 仅 metadata 张量 |
 | 后续 | 同流继续 `LaunchMla` | 结束，等待用户回传 |
 
-两条链共用：`MakeContext` → `MlaRecordLayout` → `MlaRecordArgs` → `ComputeMlaMetadata`（AICPU）→ `BuildNonquantMetadata`，区别只在「是否生成」与「是否接着跑 kernel」。
+两条链共用：`MakeContext` → `MlaRecordLayout` → `FillMlaArgs`（产出 `FAMetadataArgs`）→ `ComputeMlaMetadata`（AICPU）→ `BuildNonquantMetadata`，区别只在「是否生成」与「是否接着跑 kernel」。
 
 ---
 

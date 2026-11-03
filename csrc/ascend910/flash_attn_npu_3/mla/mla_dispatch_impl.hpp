@@ -33,6 +33,7 @@ __aicore__ inline bool LoadMla(const MlaLaunchArgs& a, MlaReader& read, MlaLayou
     l.maxOffset = s.maxOffset;
     l.bytes = s.bytes;
     read.data.SetGlobalBuffer((__gm__ uint32_t*)a.metadata);
+    read.batch = c.batch;
     return true;
 }
 template <typename T>

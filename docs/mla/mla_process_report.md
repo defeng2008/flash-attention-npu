@@ -45,7 +45,7 @@
 
 | 路径 | 数量 | 说明 |
 | --- | --- | --- |
-| `csrc/ascend910/flash_attn_npu_3/mla/` | 36 文件 | FA3 侧 MLA host/device 源码（`mla_forward.*`、`mla_validation.h`、`mla_layout.*`、`mla_tiling.*`、`mla_split.*`、`cann_split_core.*`、`mla_metadata.*`/`.aicpu`、`mla_dispatch.*`、各 `*_kernel.hpp`/`*_block.hpp`/`*_tile.hpp`） |
+| `csrc/ascend910/flash_attn_npu_3/mla/` | 35 文件 | FA3 侧 MLA host/device 源码（`mla_forward.*`、`mla_validation.h`、`mla_layout.*`、`mla_tiling.*`、`mla_split.*`、`cann_split_core.*`、`mla_metadata.*`、`mla_dispatch.*`、各 `*_kernel.hpp`/`*_block.hpp`/`*_tile.hpp`）；AICPU 入口已并入 `fa_metadata.aicpu` |
 | `csrc/ascend910/flash_attn_npu_4/mla/` | 36 文件 | FA4 侧同源源码，`mla_fwd` 契约适配为只返回 `{out, softmax_lse}` |
 | `csrc/ascend910/flash_attn_npu_{3,4}/autogen/mla_dispatch_{fp16,bf16}_{auto_split,prefill,gqa}.cpp` | 各 6 | 由 `generate_kernels.py` 生成的 MLA dispatch TU |
 | `tests/test_flash_attn_npu_v3_mla.py` | — | FA3 MLA 功能/边界/拒绝路径用例（1253 可执行用例） |
@@ -66,7 +66,7 @@
 | `csrc/ascend910/flash_attn_npu_4/flash_api.cpp` | 新增前向入口 `fa_fwd`（`fwd` 绑定到它）：先 `gather_kv_indices` 守卫 + MLA 形状签名门控（`qv`+64/512 或 无 `qv`+192/128），命中调 `mla_fwd`（缺失参数传 `std::nullopt`），否则回落 `mha_fwd`（`mha_fwd` 内已无 MLA 逻辑）+ `SchedulerMetadata` 路由 |
 | `csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py` | 新增 MLA 家族 dispatch TU 生成 |
 | `csrc/ascend910/flash_attn_npu_4/autogen/generate_kernels.py` | 同上（6 个 TU） |
-| `setup.py` | MLA host 源清单、`-Wl,--wrap=aclrtLaunchKernelWithHostArgs` 与 `-Wl,--wrap=aclrtLaunchKernelWithArgsArray`、`mla_metadata.aicpu` 编译、device 依赖增量跟踪 |
+| `setup.py` | MLA host 源清单、`-Wl,--wrap=aclrtLaunchKernelWithHostArgs` 与 `-Wl,--wrap=aclrtLaunchKernelWithArgsArray`、`fa_metadata.aicpu` 单单元编译（含 `mla/*` 输入）、device 依赖增量跟踪 |
 | `flash_attn_npu_3/flash_attn_npu_interface.py` | `_is_mla` 分流；三个公共入口 MLA 分支 |
 | `flash_attn_npu_4/flash_attn_npu_interface.py` | 同上；decode 经 `page_table`/`seqused_k`（v4 无 `flash_attn_with_kvcache`）；BNSD 显式拒绝 |
 | `tests/test_flash_attn_npu_v3_metadata.py` | 新增普通 FA3 metadata 回归用例（确保非 MLA 行为不变） |

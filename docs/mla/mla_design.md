@@ -156,7 +156,7 @@ C++ host: fa_fwd(MLA 签名) ──► flash_attn::mla::mla_fwd(...)   (早退�
 | 输入校验 | `mla/mla_validation.h` | 形状签名、dtype/device/stride、量化、TND/BSND/paged 组合校验 |
 | layout 描述 | `mla/mla_layout.cpp/.h` | BSND/TND tensor view 的 stride/storage 与 paged cache layout 解析 |
 | Tiling / 分核 | `mla/mla_tiling.cpp/.h`、`mla/mla_split.cpp/.h`、`mla/cann_split_core.cpp/.h` | 形状→块大小/核数/端点；workspace 预算；GQA/pack 资源解析 |
-| metadata 生产 | `mla/mla_metadata.cpp/.h`、`mla/mla_metadata.aicpu` | 记录格式定义（`MlaRecordHeader`/`MlaNativePartition`）、AICPU `ComputeMlaMetadata` |
+| metadata 生产 | `mla/mla_metadata.cpp/.h`、`fa_metadata.aicpu` | 统一记录结构（`FAInferTilingData` + `MlaCorePartition`、`MlaUnifiedSlot` 映射）、AICPU `ComputeMlaMetadata` 入口 |
 | metadata 消费 | `mla/mla_metadata_consumer.h` | device 侧读取记录 |
 | 调度模式注入 | `mla/mla_dispatch.cpp/.h`、`setup.py` | `--wrap` 强制 `ScheduleMode::BATCH_MODE` |
 | dispatch（数值 kernel 选择） | `mla/mla_dispatch.h` + `autogen/generate_kernels.py` 生成的 `mla_dispatch_{dtype}_{family}.cpp` | `LaunchMla` → `LaunchCompressed`/`LaunchPrefill`/`LaunchGrouped` |
@@ -165,6 +165,7 @@ C++ host: fa_fwd(MLA 签名) ──► flash_attn::mla::mla_fwd(...)   (早退�
 **AICPU metadata 通道**：`Forward` 在同一次 host 提交中先 `ComputeMlaMetadata<<<1, nullptr, stream>>>`
 （`mla_forward.cpp:325`），再 launch 数值 kernel（`:326`）。记录写入调用方传入的
 `scheduler_metadata`（`supplied` 非空）或内部 workspace（`mla_forward.cpp:274`）。
+`ComputeMlaMetadata` 与 `ComputeFAMetadataV3` 同处 `fa_metadata.aicpu` 单一编译单元。
 `SchedulerMetadata` 独立入口同样通过 `ComputeMlaMetadata`（`:371-373`）。
 
 ## 5. Tiling 与分核策略
@@ -384,8 +385,8 @@ MLA_FAMILIES = {
 | `csrc/ascend910/flash_attn_npu_3/mla/mla_tiling.h` | `kMlaMaxAic:18`、`MlaSchedule:88`、三级端点 `:104` |
 | `csrc/ascend910/flash_attn_npu_3/mla/cann_split_core.cpp` | `SplitCore:668`、`minCore/maxCore:680-683`、候选遍历 `:689` |
 | `csrc/ascend910/flash_attn_npu_3/mla/cann_split_core.h` | `FA_TOLERANCE_RATIO:25`、`IsWithinTolerance:51` |
-| `csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h` | `MlaContext:44`、`MlaRecordHeader:56`、`MlaNativePartition:63`、`MlaRecordLayout:114` |
-| `csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu` | AICPU 编译单元 |
+| `csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h` | `MlaContext:47`、`MlaCorePartition`（定义于 `tilingdata.h:39`）、`MlaUnifiedSlot:277`、`MlaRecordLayout:116` |
+| `csrc/ascend910/flash_attn_npu_3/fa_metadata.aicpu` | 唯一 AICPU 编译单元（FA/MLA 共用） |
 | `csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h` | device 读取记录 |
 | `csrc/ascend910/flash_attn_npu_3/mla/mla_layout.cpp/.h` | BSND/TND/paged 视图解析 |
 | `csrc/ascend910/flash_attn_npu_3/mla/mla_split.cpp/.h` | 累加器布局、GQA 资源、GQA 调度 |
@@ -409,7 +410,7 @@ MLA_FAMILIES = {
 | `csrc/ascend910/flash_attn_npu_{3,4}/autogen/generate_kernels.py` | `MLA_FAMILIES:111`(v3)/`:100`(v4) |
 | `flash_attn_npu_3/flash_attn_npu_interface.py` | `_is_mla:39`、default scale `:861`、BSND `:863` |
 | `flash_attn_npu_4/flash_attn_npu_interface.py` | `_is_mla:43`、MLA 固定 BSND `:914-921,:1111-1118` |
-| `setup.py` | wrap 链接参数 `:327-328`、MLA host 对象 `:695,:735`、AICPU 输入 glob `:422`、`mla_metadata.aicpu:578` |
+| `setup.py` | wrap 链接参数 `:327-328`、MLA host 对象 `:695,:735`、AICPU 输入 glob（含 `mla/*`）`:422`、`fa_metadata.aicpu` 单单元 |
 
 ## 11. 如何运行
 

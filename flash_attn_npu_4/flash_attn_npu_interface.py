@@ -277,7 +277,7 @@ def _flash_attn_forward(
 # Real metadata contract:
 #
 #   all mask types:
-#       shape = (2376,)
+#       shape = (3816,)
 #
 #   dtype  = torch.uint8
 #   device = NPU
@@ -287,7 +287,7 @@ def _flash_attn_forward(
 # get_scheduler_metadata() implementation.
 # ----------------------------------------------------------------------
 
-_SCHEDULER_METADATA_TILING_BYTES = 2336
+_SCHEDULER_METADATA_TILING_BYTES = 3816
 
 
 @torch.library.custom_op(

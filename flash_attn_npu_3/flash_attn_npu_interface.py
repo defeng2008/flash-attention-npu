@@ -966,8 +966,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         return_softmax=False,
     ):
         is_mla = _is_mla(q, v, qv, cu_seqlens_q)
-        if not is_mla:
-            _validate_varlen_query(q, cu_seqlens_q)
+        _validate_varlen_query(q, cu_seqlens_q)
         # The packed varlen query (cu_seqlens_q present) is always TND, never BNSD.
         layout = _LAYOUT_TND
         if softmax_scale is None:
@@ -1565,12 +1564,13 @@ def flash_attn_with_kvcache(
     be a multiple of 16 in [16, 1024]. Output follows q with v_cache.shape[-1].
     With qv, scores include qv @ v.T and the default scale uses both dimensions.
 
-    MLA scheduler_metadata uses int32 records bound to representation, layout,
-    mask, split and softcap activation. The device validates current lengths,
-    query prefixes and used pages. Records may be cloned or contiguous offset
-    views; scale and positive softcap values may change during reuse. Changed
-    lengths or softcap activation require regeneration. Reuse skips AICPU
-    generation; host workspace budgeting still runs.
+    MLA scheduler_metadata shares the FA uint8 record buffer (the fixed
+    FAInferTilingData region plus a variable tail) bound to representation,
+    layout, mask, split and softcap activation. The device validates current
+    lengths, query prefixes and used pages. Records may be cloned or contiguous
+    offset views; scale and positive softcap values may change during reuse.
+    Changed lengths or softcap activation require regeneration. Reuse skips
+    AICPU generation; host workspace budgeting still runs.
 
     MLA return_softmax_lse=True returns (out, softmax_lse, out_accum, lse_accum).
     LSE is FP32, [B,Hq,Sq] for BSND or [Hq,Tq] for TND, including qv scores.
@@ -1727,14 +1727,14 @@ def _validate_scheduler_metadata(
 
 # Real metadata contract (sizeof(FAInferTilingData)):
 #   all mask types:
-#       shape = (2376,)
+#       shape = (3840,)
 #   dtype  = torch.uint8
 #   device = NPU
 #   stride = (1,)
 # The custom op prevents TorchDynamo from tracing into the raw pybind
 # get_scheduler_metadata() implementation. Schema matches the V3 910
 # pybind signature in flash_api.cpp (not the V4 parameter list).
-_SCHEDULER_METADATA_TILING_BYTES = 2376
+_SCHEDULER_METADATA_TILING_BYTES = 3840
 
 
 @torch.library.custom_op(
@@ -1866,9 +1866,10 @@ def get_scheduler_metadata(
 
     Ordinary FA3 returns byte scheduling metadata. Numerical softcap and scale
     are supplied by each forward call; has_softcap selects the scheduling feature.
-    MLA uses device int32 records for compressed headdim=64/headdim_v=512
-    with one KV head, or independent prefill headdim=192/headdim_v=128 with
-    GQA. Both accept BSND/TND queries, nonpaged or ND paged caches, all masks
+    MLA uses the same device uint8 record buffer for compressed
+    headdim=64/headdim_v=512 with one KV head, or independent prefill
+    headdim=192/headdim_v=128 with GQA. Both accept BSND/TND queries, nonpaged
+    or ND paged caches, all masks
     and num_splits=0..256. The default num_splits=0 selects automatic splitting.
     Nonpaged and paged layouts accept has_softcap=True.
 

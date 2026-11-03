@@ -253,7 +253,7 @@ std::vector<at::Tensor> Forward(const at::Tensor& q, const at::Tensor& k, const 
                               : 0,
                     tnd ? q.size(0) : 0, cuK ? k.size(0) : 0, pageTable ? k.size(1) : 0, softcap > 0, pack, margin, l);
     if (supplied)
-        CheckMetadataTensor(*supplied, q.device(), l.words, "MLA: scheduler_metadata");
+        CheckMetadataBuffer(*supplied, q.device(), int64_t(MlaUnifiedBytes(l)), "MLA: scheduler_metadata");
     const int64_t b = c.batch, sq = c.sq, h = c.heads, dim = c.valueDim, capacity = splits ? splits : 26;
     auto out = tnd ? at::empty({c.totalQ, h, dim}, q.options()) : at::empty({b, sq, h, dim}, q.options());
     auto lse = tnd ? at::empty({h, c.totalQ}, q.options().dtype(at::kFloat))
@@ -271,14 +271,11 @@ std::vector<at::Tensor> Forward(const at::Tensor& q, const at::Tensor& k, const 
     auto workspace =
         at::empty({int64_t(checkedOffset + sizeof(MlaCheckedAutoSplitSchedule) + platform.libApiWorkspaceBytes)},
                   q.options().dtype(at::kByte));
-    auto metadata = supplied ? *supplied : at::empty({l.words}, q.options().dtype(at::kInt));
-    MlaRecordArgs args{c,
-                       cuQ ? TensorAddress(*cuQ) : 0,
-                       cuK ? TensorAddress(*cuK) : 0,
-                       usedQ ? TensorAddress(*usedQ) : 0,
-                       currentK ? TensorAddress(*currentK) : 0,
-                       TensorAddress(metadata),
-                       l.words};
+    auto metadata = supplied ? *supplied : at::empty({int64_t(MlaUnifiedBytes(l))}, q.options().dtype(at::kByte));
+    MlaPagedCacheInputs cache{};
+    if (pageTable)
+        cache = {paged, PagedTensorArray(*pageTable, paged.tableSpanElements), PagedTensorArray(k, paged.k.spanElements),
+                 PagedTensorArray(v, paged.v.spanElements)};
     auto stream = c10_npu::getCurrentNPUStream();
     // Local outputs and scratch stay on their allocation stream and remain captured below.
     for (const auto& tensor : {q, k, v})
@@ -302,24 +299,22 @@ std::vector<at::Tensor> Forward(const at::Tensor& q, const at::Tensor& k, const 
     a.accumLse = TensorAddress(accumLse);
     a.workspace = TensorAddress(workspace) + platform.libApiWorkspaceBytes;
     a.metadata = TensorAddress(metadata);
-    a.cuQuery = args.cuQuery;
-    a.cuKv = args.cuKv;
-    a.usedQuery = args.usedQuery;
-    a.usedKv = args.usedKv;
+    a.cuQuery = cuQ ? TensorAddress(*cuQ) : 0;
+    a.cuKv = cuK ? TensorAddress(*cuK) : 0;
+    a.usedQuery = usedQ ? TensorAddress(*usedQ) : 0;
+    a.usedKv = currentK ? TensorAddress(*currentK) : 0;
     a.checked = a.workspace + checkedOffset;
-    args.checked = a.checked;
-    args.generate = !supplied;
     a.context = c;
     a.inputs = {(tnd ? CheckTndTensorLayout(q) : CheckBsndTensorLayout(q)),
                 qv ? (tnd ? CheckTndTensorLayout(*qv) : CheckBsndTensorLayout(*qv)) : MlaBsndTensorLayout{},
                 (cuK ? CheckTndTensorLayout(k) : CheckBsndTensorLayout(k)),
                 (cuK ? CheckTndTensorLayout(v) : CheckBsndTensorLayout(v))};
-    if (pageTable)
-        a.cache = {paged, PagedTensorArray(*pageTable, paged.tableSpanElements),
-                   PagedTensorArray(k, paged.k.spanElements), PagedTensorArray(v, paged.v.spanElements)};
-    args.cache = a.cache;
+    a.cache = cache;
     a.scale = scale;
     a.softcap = softcap;
+    FAMetadataArgs args{};
+    FillMlaArgs(args, c, uint32_t(q.size(-1)), TensorAddress(metadata), a.cuQuery, a.cuKv, a.usedQuery, a.usedKv,
+                a.checked, 0, !supplied, cache);
     RunMlaLaunch("ascendc_mla", [a, args, supplied, q, qv, k, v, out, lse, accum, accumLse, workspace, metadata, usedQ,
                                  currentK, cuQ, cuK, pageTable]() mutable {
         ComputeMlaMetadata<<<1, nullptr, a.stream>>>(&args, sizeof(args));
@@ -353,17 +348,12 @@ at::Tensor SchedulerMetadata(int64_t batch, int64_t sq, int64_t sk, int64_t head
     const auto c =
         MakeContext(batch, sq, sk, heads, kvHeads, valueDim, dtype, splits, left, right, causal, 2, platform,
                     page ? (cuQ ? 4 : 3) : (cuQ ? 2 : 0), 0, 0, page.value_or(0), hasSoftcap, pack, margin, l);
-    auto metadata = at::empty({l.words}, lengths.options());
+    auto metadata = at::empty({int64_t(MlaUnifiedBytes(l))}, lengths.options().dtype(at::kByte));
     if (lengths.is_meta())
         return metadata;
-    MlaRecordArgs args{c,
-                       cuQ ? TensorAddress(*cuQ) : 0,
-                       0,
-                       0,
-                       TensorAddress(lengths),
-                       TensorAddress(metadata),
-                       l.words,
-                       uint32_t(bool(cuQ))};
+    FAMetadataArgs args{};
+    FillMlaArgs(args, c, uint32_t(dim), TensorAddress(metadata), cuQ ? TensorAddress(*cuQ) : 0, 0, 0,
+                TensorAddress(lengths), 0, uint32_t(bool(cuQ)), true, {});
     auto stream = c10_npu::getCurrentNPUStream();
     RecordInput(lengths, stream);
     if (cuQ)

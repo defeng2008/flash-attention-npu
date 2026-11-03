@@ -124,7 +124,7 @@ def test_flash_attn_metadata_real_fake_contract(data_type, has_softcap):
     actual = fa3.get_scheduler_metadata(*args)
     with FakeTensorMode(allow_non_fake_inputs=True):
         fake = fa3.get_scheduler_metadata(*args)
-    assert actual.shape == fake.shape == (2376,)
+    assert actual.shape == fake.shape == (3840,)
     assert actual.dtype == fake.dtype == torch.uint8
     assert actual.device == fake.device == lengths.device
     assert actual.stride() == fake.stride() == (1,)

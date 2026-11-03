@@ -72,6 +72,22 @@ struct FAMetadataArgs {
     // Append-KV tiling fields (0 = append disabled), mirrored by ComputeFAMetadata.
     uint32_t kvNewSeqlen;
     uint32_t kvCacheSeqlen;
+    // ---- appended MLA inputs (unused/zero for ordinary FA) ----
+    // Common quantities reuse the fields above: batch/numHeads/numHeadsK/
+    // embeddingSize(=Dq)/embeddingSizeV(=Dv)/maxQSeqlen(=sq)/blockDim(=physical
+    // cores)/numSplits(=splits)/maskType(=window kind)/windowSizeLeft|Right/
+    // pagedKV/isVarlen/isVarlenKv/metaOutAddr. MLA sk is carried by mlaMaxKv and
+    // stored in the output's maxKvSeqlen.
+    uint64_t mlaCuQuery, mlaCuKv, mlaUsedQuery, mlaUsedKv, mlaChecked, mlaWorkspaceBytes;
+    uint32_t mlaLayoutCode, mlaTotalQ, mlaTotalK, mlaPageSize, mlaUsedFlags;
+    uint32_t mlaMaxKv, mlaPacked, mlaMargin, mlaInferTotalQ, mlaGenerate, mlaDtype, mlaHasSoftcap;
+    // Flattened MlaPagedCacheInputs (layout + page table + K + V descriptors).
+    uint32_t mlaCacheBatchSize, mlaCacheMaxPages, mlaCacheLogicalCapacity, mlaCachePhysicalPages;
+    uint64_t mlaCacheTableAddr, mlaCacheTableCount, mlaCacheTableRowStride, mlaCacheTableSpanElements;
+    uint64_t mlaCacheKAddr, mlaCacheKCount, mlaCacheKBatchStride, mlaCacheKRowStride, mlaCacheKHeadStride,
+        mlaCacheKSpanElements;
+    uint64_t mlaCacheVAddr, mlaCacheVCount, mlaCacheVBatchStride, mlaCacheVRowStride, mlaCacheVHeadStride,
+        mlaCacheVSpanElements;
 };
 
 #endif

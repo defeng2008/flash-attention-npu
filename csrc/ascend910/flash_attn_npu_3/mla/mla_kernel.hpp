@@ -520,9 +520,13 @@ class MlaTaskRing {
 };
 struct MetadataReader {
     AscendC::GlobalTensor<uint32_t> data;
+    uint32_t batch = 0;
+    // The stored record is FAInferTilingData (the fixed uint32 block, see
+    // mla_metadata.h) followed by a variable tail. MlaUnifiedSlot translates the
+    // logical record word space onto that physical layout.
     __aicore__ inline uint32_t operator()(uint64_t word) const
     {
-        return data.GetValue(word);
+        return data.GetValue(MlaUnifiedSlot(batch, word));
     }
 };
 } // namespace flash_attn::mla::Kernel

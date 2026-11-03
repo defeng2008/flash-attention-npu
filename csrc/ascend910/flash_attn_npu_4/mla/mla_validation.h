@@ -23,6 +23,17 @@ inline void CheckMetadataTensor(const at::Tensor& tensor, const at::Device& devi
     TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
 }
 
+// The unified scheduler_metadata is an opaque byte buffer: FAInferStaticTilingData
+// followed by a variable tail. It mirrors the ordinary FA4 metadata tensor.
+inline void CheckMetadataBuffer(const at::Tensor& tensor, const at::Device& device, int64_t bytes, const char* name)
+{
+    TORCH_CHECK(tensor.scalar_type() == at::kByte, name, " must have dtype uint8");
+    TORCH_CHECK((device.type() == at::kPrivateUse1 || device.is_meta()) && tensor.device() == device, name,
+                " must be on the same NPU device");
+    TORCH_CHECK(tensor.dim() == 1 && tensor.numel() == bytes, name, " must exactly match shape [", bytes, "]");
+    TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+}
+
 inline MlaBsndTensorLayout CheckBsndTensorLayout(const at::Tensor& tensor)
 {
     MlaBsndTensorView view{};

@@ -114,7 +114,7 @@ __global__ __aicore__ __mix__(1, 2) void CompressedAttention(MlaLaunchArgs a)
     const MlaPartitionView<MlaReader> view{read, a.context, l};
     Kernel::MlaAutoSplit<DType, IsTnd, Paged> op;
     op(s, view, a.context.window, a.scale, (GM_ADDR)a.qv, (GM_ADDR)a.q, (GM_ADDR)a.v, (GM_ADDR)a.k, (GM_ADDR)a.out,
-       (GM_ADDR)a.lse, (GM_ADDR)a.workspace, &pipe, (GM_ADDR)a.metadata + 4 * kMlaRecordHeaderWords, a.context.totalQ,
+       (GM_ADDR)a.lse, (GM_ADDR)a.workspace, &pipe, (GM_ADDR)a.metadata + 4 * kMlaUnifiedFixedWords, a.context.totalQ,
        a.inputs, a.context.layout == 1, a.softcap, (GM_ADDR)a.cache.table.address, &a.cache.layout);
     if (a.context.splits == 0)
         AutoMerge<DType, IsTnd>(a, s, view, &pipe);

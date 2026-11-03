@@ -12,7 +12,7 @@
 
 static_assert(std::is_trivially_copyable<FAInferStaticTilingData>::value, "static tiling must be trivially copyable");
 static_assert(std::is_standard_layout<FAInferStaticTilingData>::value, "static tiling must have a stable layout");
-static_assert(sizeof(FAInferStaticTilingData) == 2336, "static metadata ABI changed; update Python fake size");
+static_assert(sizeof(FAInferStaticTilingData) == 3816, "static metadata ABI changed; update Python fake size");
 static_assert(std::is_trivially_copyable<FAInferRuntimeData>::value, "runtime tiling must be trivially copyable");
 static_assert(std::is_standard_layout<FAInferRuntimeData>::value, "runtime tiling must have a stable layout");
 static_assert(sizeof(FAInferRuntimeData) == 96, "runtime tiling ABI changed");
@@ -77,6 +77,23 @@ struct FAMetadataArgs {
     // rewrite. FD must stay off: SWA valid keys sit in the last KV stacks, and
     // split-KV combine of the empty prefix tiles is wrong. Matches host tiling.
     uint32_t isLocal;
+    // ---- appended MLA inputs (unused/zero for ordinary FA) ----
+    // Common quantities reuse the fields above: batch/numHeads/numHeadsK/
+    // embeddingSize(=Dq)/embeddingSizeV(=Dv)/maxQSeqlen(=sq)/blockDim(=physical
+    // cores)/numSplits(=splits)/metaOutAddr. FA4 keeps mask/window in
+    // FAInferRuntimeData, so MLA carries its own mlaMask/mlaLeft/mlaRight.
+    // MLA sk is carried by mlaMaxKv and stored in the output's maxKvSeqlen.
+    uint64_t mlaCuQuery, mlaCuKv, mlaUsedQuery, mlaUsedKv, mlaChecked, mlaWorkspaceBytes;
+    uint32_t mlaLayoutCode, mlaTotalQ, mlaTotalK, mlaPageSize, mlaUsedFlags;
+    uint32_t mlaMaxKv, mlaPacked, mlaMargin, mlaInferTotalQ, mlaGenerate, mlaDtype, mlaHasSoftcap;
+    uint32_t mlaMask, mlaLeft, mlaRight;
+    // Flattened MlaPagedCacheInputs (layout + page table + K + V descriptors).
+    uint32_t mlaCacheBatchSize, mlaCacheMaxPages, mlaCacheLogicalCapacity, mlaCachePhysicalPages;
+    uint64_t mlaCacheTableAddr, mlaCacheTableCount, mlaCacheTableRowStride, mlaCacheTableSpanElements;
+    uint64_t mlaCacheKAddr, mlaCacheKCount, mlaCacheKBatchStride, mlaCacheKRowStride, mlaCacheKHeadStride,
+        mlaCacheKSpanElements;
+    uint64_t mlaCacheVAddr, mlaCacheVCount, mlaCacheVBatchStride, mlaCacheVRowStride, mlaCacheVHeadStride,
+        mlaCacheVSpanElements;
 };
 
 // CPU-computed launch payload. AICPU writes only this small, private runtime
