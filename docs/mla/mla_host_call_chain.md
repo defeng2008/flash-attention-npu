@@ -129,8 +129,8 @@ get_scheduler_metadata(...)                   flash_api.cpp L812
 | 入口 | `fa_fwd`（`IsMlaForward` 门控）→ `mla_fwd` | `get_scheduler_metadata` |
 | 启动方式 | `RunMlaLaunch`（直调 ACL，带 blocking 兜底） | 恒 `OpCommand::RunOpApiV2` |
 | `generate` | `!supplied`（有则跳过生成） | 恒 true（走默认值） |
-| `inferTotalQ` | 0（未设置） | `uint32_t(bool(cuQ))` |
-| `cuKv / usedQuery / usedKv` | 真实地址 | 恒 0 |
+| `inferTotalQ` | 0（未设置） | `bool(cuQ) \| (cuKv ? 2 : 0)`（bit0 由 `cuQuery` 推断 totalQ、bit1 由 `cuKv` 推断 totalK） |
+| `cuKv / usedQuery / usedKv` | 真实地址 | `cuKv`/`usedQ`/`usedK` 传真实地址；`usedK` 为空且 `cuKv` 也为空时回落 `cache_seqlens` |
 | `checked` | 有（workspace 内偏移，写 `mlaChecked`） | 无（`mlaChecked` 为空 → 跳过自校验） |
 | 产出 | `out / lse / accum / accumLse` + metadata | 仅 metadata 张量 |
 | 后续 | 同流继续 `LaunchMla` | 结束，等待用户回传 |
@@ -147,10 +147,14 @@ AICPU 只做 `CheckRecord` 自校验。`_get_scheduler_metadata_op` 对该记录
 `_fa_scheduler_params` fingerprint（`:1792-1803`），但 MLA 记录的校验在
 `flash_attn_with_kvcache` 中被显式关闭。
 
-以下入口的 MLA 分支**不**走离线链，记录仍由 forward 内部生成：
+以下入口的 MLA 分支也走离线链，记录由 host 生成、AICPU 只做 `CheckRecord` 自校验：
 
-- v3 `flash_attn_varlen_func`：TND 打包 KV（`cu_seqlens_k`）下 forward 走布局 1，而离线链只能
-  表达布局 2，二者不一致（`flash_attn_npu_interface.py:959-968`）。
-- v4 `flash_attn_func` / `flash_attn_varlen_func`：v4 的 `get_scheduler_metadata` 无
-  `qkv_dtype`，MLA 记录固定按 BF16 落盘，FP16 调用方会与实际张量 dtype 不一致
-  （`flash_attn_npu_4/flash_api.cpp:779-786`）。
+- v3 `flash_attn_varlen_func`：MLA 传 `headdim_v=v.shape[-1]`、`cu_seqlens_k`、`seqlens_q=cu_seqlens_q`
+  与 `seqused_q/seqused_k`，离线链据此表达布局 1（TND 打包 KV）或布局 2（TND Q + BSND KV）
+  （`flash_attn_npu_interface.py:996-1023`）。
+- v4 `flash_attn_func` / `flash_attn_varlen_func`：v4 的 `get_scheduler_metadata` 已扩展
+  `qkv_dtype`/`cu_seqlens_k`/`seqused_k`，非分页 MLA 记录由 host 生成
+  （`flash_attn_npu_4/flash_api.cpp:782-790`）。
+
+唯一例外：v4 分页 MLA KV（布局 3/4）仍由 AICPU 现场生成 —— v4 离线链没有 page size 入参，
+无法绑定页对齐容量，varlen 分支以 `is_mla and page_table is not None` 为守卫跳过 host 生成。

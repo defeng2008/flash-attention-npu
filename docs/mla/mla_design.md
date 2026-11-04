@@ -120,14 +120,18 @@ FA3/FA4 路径不变。门控仅判定形状签名，layout/dtype/KV 头数等�
   `_fa_scheduler_params` fingerprint（`:1792-1803`）。该 fingerprint 只在
   `flash_attn_with_kvcache` 中经 `_validate_scheduler_metadata` 校验，且该校验对 MLA 关闭
   （见 §8.3），因此不影响 MLA 记录 `clone()` / 存储切片后的形态。
-- **v3 `flash_attn_varlen_func`（`FlashAttnVarlenFunc.forward`）**：MLA **不**生成 host 侧记录
-  （`:959-960`）。原因是 TND 打包 KV（`cu_seqlens_k`）下 forward 走布局 1（TND 稠密），而
-  `get_scheduler_metadata` 只能表达布局 2（TND Q + BSND KV），host 记录与 forward 选择的
-  布局不一致；由 forward 内部生成才与自身布局一致。
-- **v4**：`flash_attn_func` / `flash_attn_varlen_func` 的 MLA 分支均**不**生成 host 侧记录。
-  v4 的 `get_scheduler_metadata` 签名（FA4 风格）没有 `qkv_dtype`，其 MLA 路由固定按
-  `at::kBFloat16` 落记录（`flash_attn_npu_4/flash_api.cpp:779-786`）；对 FP16 调用方该记录的
-  dtype 与实际张量不符，会导致设备侧异常。故 v4 保持 MLA 记录仅由 AICPU 内部生成。
+- **v3 `flash_attn_varlen_func`（`FlashAttnVarlenFunc.forward`）**：MLA 与非 MLA 都生成
+  host 侧记录。非 MLA 传 `headdim_v=head_size`、`cu_seqlens_k=None`；MLA 传
+  `headdim_v=v.shape[-1]`、`cu_seqlens_k=cu_seqlens_k`、`seqlens_q=cu_seqlens_q`
+  （打包前缀，而非逐 batch 长度）、`seqused_q`/`seqused_k`、`pack_gqa=pack_gqa`。
+  离线链据此可表达布局 1（TND 打包 KV）与布局 2（TND Q + BSND KV），且因
+  `flash_api.cpp` 已放开 MLA 的 `cu_seqlens_k` 拒绝并透传，host 记录与 forward 选择的布局一致。
+- **v4**：`flash_attn_func` 与 `flash_attn_varlen_func` 的 MLA 分支均生成 host 侧记录。
+  v4 的 `get_scheduler_metadata` 扩展了可选 `qkv_dtype`/`cu_seqlens_k`/`seqused_k`；
+  不传 `qkv_dtype` 时仍按 `at::kBFloat16` 落记录（`flash_attn_npu_4/flash_api.cpp:782-790`）。
+  **例外**：分页 MLA KV（布局 3/4）仍由 AICPU 现场生成 —— v4 离线链没有 page size 入参，
+  无法绑定页对齐容量，故 varlen 分支以 `is_mla and page_table is not None` 为守卫保持
+  `scheduler_metadata=None`。
 
 ## 4. 数据流与模块划分
 

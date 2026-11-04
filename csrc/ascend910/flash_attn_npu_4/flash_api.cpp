@@ -774,16 +774,19 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   std::optional<at::Tensor> cu_seqlens_q = std::nullopt, bool causal = false,
                                   int64_t window_left = -1, int64_t window_right = -1, int64_t num_splits = 0,
                                   std::optional<bool> pack_gqa = std::nullopt, int64_t = 0,
-                                  std::optional<at::Tensor> seqused_q = std::nullopt)
+                                  std::optional<at::Tensor> seqused_q = std::nullopt,
+                                  std::optional<at::Tensor> seqused_k = std::nullopt,
+                                  std::optional<at::Tensor> cu_seqlens_k_meta = std::nullopt,
+                                  std::optional<at::ScalarType> qkv_dtype = std::nullopt)
 {
     if (headdim != headdim_v) {
         // MLA compressed (64/512) and prefill (192/128) metadata come from the
-        // shared MLA scheduler. The v4 signature carries no qkv_dtype; the
-        // record's dtype field does not change the layout, so tag it BF16.
+        // shared MLA scheduler. Without a qkv dtype the record is tagged BF16;
+        // the header then only matches a BF16 forward.
         return flash_attn::mla::SchedulerMetadata(
-            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v, at::kBFloat16,
-            cache_seqlens, cu_seqlens_q, std::nullopt, window_left, window_right, causal, false, num_splits, pack_gqa,
-            0);
+            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v,
+            qkv_dtype.value_or(at::kBFloat16), cache_seqlens, cu_seqlens_q, cu_seqlens_k_meta, std::nullopt,
+            window_left, window_right, causal, false, num_splits, pack_gqa, 0, seqused_q, seqused_k);
     }
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     TORCH_CHECK(cache_seqlens.device().type() == at::kPrivateUse1, "cache_seqlens must be on NPU");

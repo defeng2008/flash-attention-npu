@@ -816,16 +816,18 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   std::optional<at::Tensor> cache_leftpad, std::optional<int64_t> page_size,
                                   int64_t max_seqlen_k_new, bool causal, int64_t window_size_left,
                                   int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
-                                  int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
+                                  int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin,
+                                  std::optional<at::Tensor> seqused_q = std::nullopt,
+                                  std::optional<at::Tensor> seqused_k = std::nullopt)
 {
     if (headdim != headdim_v) {
-        TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !cache_leftpad && max_seqlen_k_new == 0 &&
-                        attention_chunk == 0,
+        TORCH_CHECK(!cu_seqlens_k_new && !cache_leftpad && max_seqlen_k_new == 0 && attention_chunk == 0,
                     "MLA: metadata append, leftpad and attention_chunk are unsupported");
         return flash_attn::mla::SchedulerMetadata(
             batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v,
-            pybind11::cast<at::ScalarType>(qkv_dtype), cache_seqlens, seqlens_q, page_size, window_size_left,
-            window_size_right, causal, has_softcap, num_splits, pack_gqa, sm_margin);
+            pybind11::cast<at::ScalarType>(qkv_dtype), cache_seqlens, seqlens_q, cu_seqlens_k, page_size,
+            window_size_left, window_size_right, causal, has_softcap, num_splits, pack_gqa, sm_margin, seqused_q,
+            seqused_k);
     }
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     const bool is_varlen_q = seqlens_q.has_value();

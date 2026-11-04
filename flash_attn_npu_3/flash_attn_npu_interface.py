@@ -971,53 +971,56 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         layout = _LAYOUT_TND
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        scheduler_metadata = None
-        if not is_mla:
-            # Training interfaces do not expose scheduler_metadata (aligned with
-            # official flash-attn); the scheduler metadata is computed internally on
-            # the AICPU so no D2H/H2D sync breaks the pipeline. cache_seqlens holds
-            # the per-batch KV lengths and stays on device.
-            #
-            # MLA is excluded: its schedule is bound to the packed-KV (cu_seqlens_k)
-            # layout while get_scheduler_metadata only describes BSND KV, so a host
-            # record would not match the layout the forward selects.
-            batch_size = cu_seqlens_q.shape[0] - 1
-            num_heads, head_size = q.shape[1], q.shape[2]
-            num_heads_k = k.shape[1]
-            if seqused_k is not None:
-                cache_seqlens = seqused_k
-            else:
-                cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-            if seqused_q is not None:
-                seqlens_q = seqused_q
-            else:
-                seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            # Pass the per-batch used lengths directly to the internal scheduler.
-            scheduler_metadata = _get_scheduler_metadata_op(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads,
-                num_heads_k,
-                head_size,
-                headdim_v=head_size,
-                qkv_dtype=q.dtype,
-                cache_seqlens=maybe_contiguous(cache_seqlens),
-                seqlens_q=seqlens_q,
-                cu_seqlens_k=None,
-                cu_seqlens_k_new=None,
-                cache_leftpad=None,
-                page_size=None,
-                max_seqlen_k_new=0,
-                causal=causal,
-                window_size_left=window_size[0],
-                window_size_right=window_size[1],
-                attention_chunk=0,
-                has_softcap=softcap > 0.0,
-                num_splits=num_splits,
-                pack_gqa=None,
-                sm_margin=sm_margin,
-            )
+        # Training interfaces do not expose scheduler_metadata (aligned with
+        # official flash-attn); the record is built here on the host and consumed
+        # on device so no D2H/H2D sync breaks the pipeline. cache_seqlens holds the
+        # per-batch KV lengths and stays on device.
+        #
+        # MLA shares the generator: its compressed/prefill head dims select the MLA
+        # scheduler and the packed KV prefixes are forwarded, so the record matches
+        # the layout the forward selects (including packed TND KV).
+        batch_size = cu_seqlens_q.shape[0] - 1
+        num_heads, head_size = q.shape[1], q.shape[2]
+        num_heads_k = k.shape[1]
+        if seqused_k is not None:
+            cache_seqlens = seqused_k
+        else:
+            cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        if is_mla:
+            # MLA records bind the packed query prefix instead of per-batch lengths.
+            seqlens_q = cu_seqlens_q
+        elif seqused_q is not None:
+            seqlens_q = seqused_q
+        else:
+            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        # Pass the per-batch used lengths directly to the internal scheduler.
+        scheduler_metadata = _get_scheduler_metadata_op(
+            batch_size,
+            max_seqlen_q,
+            max_seqlen_k,
+            num_heads,
+            num_heads_k,
+            head_size,
+            headdim_v=v.shape[-1] if is_mla else head_size,
+            qkv_dtype=q.dtype,
+            cache_seqlens=maybe_contiguous(cache_seqlens),
+            seqlens_q=seqlens_q,
+            cu_seqlens_k=cu_seqlens_k if is_mla else None,
+            cu_seqlens_k_new=None,
+            cache_leftpad=None,
+            page_size=None,
+            max_seqlen_k_new=0,
+            causal=causal,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            attention_chunk=0,
+            has_softcap=softcap > 0.0,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa if is_mla else None,
+            sm_margin=sm_margin,
+            seqused_q=seqused_q if is_mla else None,
+            seqused_k=seqused_k if is_mla else None,
+        )
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
             k,
@@ -1765,6 +1768,8 @@ def _get_scheduler_metadata_op(
     num_splits: int,
     pack_gqa: Optional[bool],
     sm_margin: int,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_k: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
         batch_size,
@@ -1790,6 +1795,8 @@ def _get_scheduler_metadata_op(
         num_splits,
         pack_gqa,
         sm_margin,
+        seqused_q,
+        seqused_k,
     )
     # Keep this side effect inside the opaque custom op so Dynamo does not
     # trace the setattr while still attaching the runtime fingerprint.
@@ -1831,6 +1838,8 @@ def _get_scheduler_metadata_fake(
     num_splits: int,
     pack_gqa: Optional[bool],
     sm_margin: int,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_k: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty(
         (_SCHEDULER_METADATA_TILING_BYTES,),

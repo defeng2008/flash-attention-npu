@@ -24,8 +24,9 @@ mla_fwd(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const std
 
 at::Tensor SchedulerMetadata(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads, int64_t dim,
                              int64_t valueDim, at::ScalarType dtype, const at::Tensor& lengths,
-                             const std::optional<at::Tensor>& cuQ, std::optional<int64_t> page, int64_t left,
-                             int64_t right, bool causal, bool hasSoftcap, int64_t splits, std::optional<bool> pack,
-                             int64_t margin);
+                             const std::optional<at::Tensor>& cuQ, const std::optional<at::Tensor>& cuKv,
+                             std::optional<int64_t> page, int64_t left, int64_t right, bool causal, bool hasSoftcap,
+                             int64_t splits, std::optional<bool> pack, int64_t margin,
+                             const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& usedK);
 
 } // namespace flash_attn::mla

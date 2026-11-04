@@ -327,9 +327,10 @@ std::vector<at::Tensor> Forward(const at::Tensor& q, const at::Tensor& k, const 
 
 at::Tensor SchedulerMetadata(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads, int64_t dim,
                              int64_t valueDim, at::ScalarType dtype, const at::Tensor& lengths,
-                             const std::optional<at::Tensor>& cuQ, std::optional<int64_t> page, int64_t left,
-                             int64_t right, bool causal, bool hasSoftcap, int64_t splits, std::optional<bool> pack,
-                             int64_t margin)
+                             const std::optional<at::Tensor>& cuQ, const std::optional<at::Tensor>& cuKv,
+                             std::optional<int64_t> page, int64_t left, int64_t right, bool causal, bool hasSoftcap,
+                             int64_t splits, std::optional<bool> pack, int64_t margin,
+                             const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& usedK)
 {
     TORCH_CHECK(batch >= 0 && batch <= UINT32_MAX && sq >= 0 && sq <= INT32_MAX && sk >= 0 && sk <= INT32_MAX &&
                     heads > 0 && heads <= INT32_MAX && kvHeads > 0 && kvHeads <= INT32_MAX && heads % kvHeads == 0 &&
@@ -337,31 +338,48 @@ at::Tensor SchedulerMetadata(int64_t batch, int64_t sq, int64_t sk, int64_t head
                 "MLA: metadata shape bounds exceeded; KV heads must divide query heads");
     TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16, not INT8");
     TORCH_CHECK(!page || (*page > 0 && *page <= INT32_MAX), "MLA: page_size must be positive and fit int32");
+    TORCH_CHECK(!cuKv || !page, "MLA: packed KV prefixes and a page table are mutually exclusive");
     CheckCacheLengths(lengths, batch, lengths.device());
     if (cuQ)
         CheckMetadataQueryPrefix(*cuQ, batch, lengths.device());
+    if (cuKv)
+        CheckMetadataQueryPrefix(*cuKv, batch, lengths.device());
+    if (usedQ)
+        CheckMetadataTensor(*usedQ, lengths.device(), batch, "MLA: seqused_q");
+    if (usedK)
+        CheckMetadataTensor(*usedK, lengths.device(), batch, "MLA: seqused_k");
     const c10::OptionalDeviceGuard device_guard(device_of(lengths));
     TORCH_CHECK((dim == 64 && valueDim == 512 && kvHeads == 1) || (dim == 192 && valueDim == 128),
                 "MLA: expected compressed 64/512 or prefill 192/128 dimensions");
     const auto platform = lengths.is_meta() ? ShapePlatform() : DevicePlatform(lengths.device().index(), false);
+    // The forward derives its used flags from the tensors it receives: an
+    // explicit seqused_q sets bit0; bit1 is set by seqused_k, except for the
+    // synthetic full-length KV that nonpacked metadata always carries.
+    const uint32_t flags = uint32_t(bool(usedQ)) | (uint32_t(cuKv ? bool(usedK) : true) << 1);
     MlaLayout l{};
     const auto c =
-        MakeContext(batch, sq, sk, heads, kvHeads, valueDim, dtype, splits, left, right, causal, 2, platform,
-                    page ? (cuQ ? 4 : 3) : (cuQ ? 2 : 0), 0, 0, page.value_or(0), hasSoftcap, pack, margin, l);
+        MakeContext(batch, sq, sk, heads, kvHeads, valueDim, dtype, splits, left, right, causal, flags, platform,
+                    page ? (cuQ ? 4 : 3) : cuKv ? 1 : (cuQ ? 2 : 0), 0, 0, page.value_or(0), hasSoftcap, pack, margin, l);
     auto metadata = at::empty({int64_t(MlaUnifiedBytes(l))}, lengths.options().dtype(at::kByte));
     if (lengths.is_meta())
         return metadata;
+    // Packed TND KV has no host-side total; AICPU infers both totals from the
+    // trailing prefix element so no D2H synchronization is needed.
+    const uint32_t infer = uint32_t(bool(cuQ)) | (uint32_t(cuKv ? 2 : 0));
     FAMetadataArgs args{};
-    FillMlaArgs(args, c, uint32_t(dim), TensorAddress(metadata), cuQ ? TensorAddress(*cuQ) : 0, 0, 0,
-                TensorAddress(lengths), 0, uint32_t(bool(cuQ)), true, {});
+    FillMlaArgs(args, c, uint32_t(dim), TensorAddress(metadata), cuQ ? TensorAddress(*cuQ) : 0,
+                cuKv ? TensorAddress(*cuKv) : 0, usedQ ? TensorAddress(*usedQ) : 0,
+                usedK ? TensorAddress(*usedK) : (cuKv ? 0 : TensorAddress(lengths)), 0, infer, true, {});
     auto stream = c10_npu::getCurrentNPUStream();
     RecordInput(lengths, stream);
-    if (cuQ)
-        RecordInput(*cuQ, stream);
-    at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_metadata", [metadata, lengths, cuQ, args, stream]() mutable {
-        ComputeMlaMetadata<<<1, nullptr, stream.stream(false)>>>(&args, sizeof(args));
-        return 0;
-    });
+    for (const auto& tensor : {cuQ, cuKv, usedQ, usedK})
+        if (tensor)
+            RecordInput(*tensor, stream);
+    at_npu::native::OpCommand::RunOpApiV2(
+        "ascendc_mla_metadata", [metadata, lengths, cuQ, cuKv, usedQ, usedK, args, stream]() mutable {
+            ComputeMlaMetadata<<<1, nullptr, stream.stream(false)>>>(&args, sizeof(args));
+            return 0;
+        });
     return metadata;
 }
 

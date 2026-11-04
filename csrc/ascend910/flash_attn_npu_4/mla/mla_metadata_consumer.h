@@ -614,8 +614,11 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadMlaMetadata(const Reader& read, co
     }
     const auto header = MlaHeader(c, l, qCapacity, kCapacity);
     const auto* expected = reinterpret_cast<const uint32_t*>(&header);
+    // Reserved words 29..31 have no stored slot; skip them exactly like
+    // WriteMlaHeader. MlaUnifiedSlot aliases them onto slot 0 (numHeads), so
+    // comparing them would always report a spurious mismatch.
     for (uint32_t i = 0; i < kMlaRecordHeaderWords; ++i)
-        if (read(i) != expected[i])
+        if (kMlaUnifiedHeaderSlot[i] != UINT32_MAX && read(i) != expected[i])
             return S::ShapeMismatch;
     if (l.bytes > c.workspaceBytes)
         return S::InvalidWorkspace;

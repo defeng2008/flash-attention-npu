@@ -311,6 +311,9 @@ def _get_scheduler_metadata_op(
     pack_gqa: Optional[bool],
     sm_margin: int,
     seqused_q: Optional[torch.Tensor] = None,
+    seqused_k: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    qkv_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     # Keep the raw pybind call behind a torch.library op. Calling a pybind
     # function directly from a torch.compile graph is treated as an opaque
@@ -332,6 +335,9 @@ def _get_scheduler_metadata_op(
         pack_gqa,
         sm_margin,
         seqused_q,
+        seqused_k,
+        cu_seqlens_k,
+        qkv_dtype,
     )
 
 
@@ -353,6 +359,9 @@ def _get_scheduler_metadata_fake(
     pack_gqa: Optional[bool],
     sm_margin: int,
     seqused_q: Optional[torch.Tensor] = None,
+    seqused_k: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    qkv_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     # The metadata is an opaque byte buffer during tracing. Ascend 910 FA4
     # serializes one fixed-size FAInferStaticTilingData object, so returning a
@@ -385,6 +394,7 @@ def get_scheduler_metadata(
     leftpad_k: Optional[torch.Tensor] = None,
     seqlen_k_per_split: Optional[int] = None,
     _arch: Optional[int] = None,
+    qkv_dtype: Optional[torch.dtype] = None,
 ):
     """Precompute Ascend 910 FA4 metadata using the Tri Dao FA4 signature.
 
@@ -443,6 +453,9 @@ def get_scheduler_metadata(
         pack_gqa,
         0,
         seqused_q,
+        seqused_k,
+        cu_seqlens_k,
+        qkv_dtype,
     )
 
 
@@ -761,39 +774,41 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
 
-        # MLA shares this entry point. It carries its own tiling contract, so it
-        # skips the FA4 scheduler metadata and only accepts TND/BSND inputs.
+        # MLA shares this entry point. It carries its own tiling contract and only
+        # accepts TND/BSND inputs; it still uses the shared host generator.
         # A BSND-shaped view over contiguous BNSD storage (``transpose(1, 2)``)
         # is accepted through its strides: the native MLA path consumes the BSND
         # shape only, and ``out`` keeps that BSND shape.
-        scheduler_metadata = None
         layout = _LAYOUT_BSND
+        # Compute scheduler metadata on the AICPU (no D2H/H2D sync), matching
+        # the v3 dense path. cache_seqlens holds the per-batch KV lengths.
+        # MLA shares the generator with its own head dims; it keeps the BSND shape
+        # and never runs layout detection.
+        batch_size, seqlen_q, num_heads, head_size = q.shape
+        seqlen_k = k.shape[1]
+        num_heads_k = k.shape[2]
+        head_size_v = v.shape[-1]
         if not _is_mla(q, v, qv):
-            # Compute scheduler metadata on the AICPU (no D2H/H2D sync), matching
-            # the v3 dense path. cache_seqlens holds the per-batch KV lengths.
-            batch_size, seqlen_q, num_heads, head_size = q.shape
-            seqlen_k = k.shape[1]
-            num_heads_k = k.shape[2]
-            head_size_v = v.shape[-1]
             # get_scheduler_metadata only takes numbers and reads them as BSND, so the
             # sizes above come from the pre-detection shapes; BNSD only re-views the
             # same storage.
             layout, q, k, v, out_transposed = _detect_layout(q, k, v, None, None)
-            seqused_k = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
-            scheduler_metadata = get_scheduler_metadata(
-                max_seqlen_q=seqlen_q,
-                max_seqlen_k=seqlen_k,
-                nheads=num_heads,
-                nheads_kv=num_heads_k,
-                headdim=head_size,
-                num_splits=num_splits,
-                headdim_v=head_size_v,
-                pack_gqa=pack_gqa,
-                causal=causal,
-                window_size_left=window_size[0],
-                window_size_right=window_size[1],
-                seqused_k=seqused_k,
-            )
+        seqused_k = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
+        scheduler_metadata = get_scheduler_metadata(
+            max_seqlen_q=seqlen_q,
+            max_seqlen_k=seqlen_k,
+            nheads=num_heads,
+            nheads_kv=num_heads_k,
+            headdim=head_size,
+            num_splits=num_splits,
+            headdim_v=head_size_v,
+            pack_gqa=pack_gqa,
+            causal=causal,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            seqused_k=seqused_k,
+            qkv_dtype=q.dtype,
+        )
 
         out, softmax_lse = _flash_attn_forward(
             q,
@@ -961,17 +976,22 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         # cu_seqlens_q packs the query (TND); otherwise the rank-4 data is BSND,
         # which also covers a BSND-shaped view over contiguous BNSD storage.
         layout = _LAYOUT_TND if cu_seqlens_q is not None else _LAYOUT_BSND
-        if is_mla:
-            # MLA carries its own tiling contract, so it skips the FA4 scheduler
-            # metadata and consumes the BSND shape; the strides carry the layout.
-            scheduler_metadata = None
-            disable_scheduler_metadata = True
+        # MLA also routes through the shared host generator: its compressed/prefill
+        # head dims select the MLA scheduler, and the packed KV prefixes are
+        # forwarded so the record matches the layout the forward selects. Paged MLA
+        # KV (layouts 3/4) is the exception: the generator has no page size and
+        # cannot bind the page-aligned capacity, so the device builds that record.
         if seqused_k is not None and isinstance(seqused_k, int):
             seqused_k = torch.full((q.shape[0],), seqused_k, dtype=torch.int32, device=k.device)
             seqused_k = maybe_contiguous(seqused_k)
 
         fwd_max_seqlen_k = max_seqlen_k
-        if not is_mla and scheduler_metadata is None and not disable_scheduler_metadata and q.shape[0] != 0:
+        if (
+            scheduler_metadata is None
+            and not disable_scheduler_metadata
+            and q.shape[0] != 0
+            and not (is_mla and page_table is not None)
+        ):
             is_varlen_q = cu_seqlens_q is not None
             num_heads = q.shape[1] if is_varlen_q else q.shape[2]
             head_size = q.shape[2] if is_varlen_q else q.shape[3]
@@ -985,7 +1005,11 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
                 )
             else:
                 cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-            if seqused_q is not None:
+            if is_mla:
+                # MLA records bind the packed query prefix instead of per-batch
+                # lengths, so the forward's layout is reproduced exactly.
+                seqlens_q_arg = cu_seqlens_q
+            elif seqused_q is not None:
                 seqlens_q_arg = seqused_q
             elif not is_varlen_q:
                 seqlens_q_arg = None
@@ -1014,6 +1038,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
                 window_size_right=window_size[1],
                 seqused_k=cache_seqlens,
                 seqused_q=seqlens_q_arg,
+                cu_seqlens_k=cu_seqlens_k if is_mla else None,
+                qkv_dtype=q.dtype,
             )
 
         out, softmax_lse = _flash_attn_forward(

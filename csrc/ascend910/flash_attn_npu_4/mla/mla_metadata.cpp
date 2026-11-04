@@ -41,11 +41,17 @@ bool BuildNonquantMetadata(const FAMetadataArgs& a)
             (address && count > (UINT64_MAX - address) / 4))
             return true;
     }
+    // bits 0/1 ask the device to infer the query/KV totals from the trailing
+    // element of the packed prefix, so no host-side D2H read is required.
     if ((c.dtype != uint32_t(MlaMetadataDtype::Fp16) && c.dtype != uint32_t(MlaMetadataDtype::Bf16)) ||
-        a.mlaInferTotalQ > 1 || (a.mlaInferTotalQ && c.layout != 2 && c.layout != 4))
+        a.mlaInferTotalQ > 3 || ((a.mlaInferTotalQ & 1U) && !MlaTnd(c)) ||
+        ((a.mlaInferTotalQ & 2U) && c.layout != 1))
         return true;
     if (a.mlaInferTotalQ) {
-        c.totalQ = reinterpret_cast<const uint32_t*>(a.mlaCuQuery)[c.batch];
+        if (a.mlaInferTotalQ & 1U)
+            c.totalQ = reinterpret_cast<const uint32_t*>(a.mlaCuQuery)[c.batch];
+        if (a.mlaInferTotalQ & 2U)
+            c.totalK = reinterpret_cast<const uint32_t*>(a.mlaCuKv)[c.batch];
         if (!MlaRecordLayout(c, l))
             return true;
     }

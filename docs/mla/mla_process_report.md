@@ -159,12 +159,14 @@ GQA（prefill KV 头 >1）× 空 query/KV × 非连续视图 × 多流生命周�
 
 `flash_attn_func` 的 host 侧记录改为 MLA 与非 MLA 一视同仁（`flash_attn_npu_interface.py:788-818`），
 `_get_scheduler_metadata_op` 不再对 MLA 提前返回、MLA 记录同样挂 fingerprint（`:1792-1803`）。
-以下入口的 MLA 分支仍保持「记录由 AICPU 内部生成」，语义与详细原因见
-[mla_design.md §3.4](./mla_design.md#34-host-侧-scheduler_metadata-的生成与传入)：
+varlen 与 v4 入口也已打通：`flash_api.cpp` 放开 MLA 的 `cu_seqlens_k` 拒绝并透传，
+`SchedulerMetadata` 新增 `cuKv`/`usedQ`/`usedK`，AICPU 用 bitflags 从打包前缀推断 totalQ/totalK，
+故离线链可表达布局 1（TND 打包 KV）；v4 的 `get_scheduler_metadata` 补上
+`qkv_dtype`/`cu_seqlens_k`/`seqused_k`。语义与详细原因见
+[mla_design.md §3.4](./mla_design.md#34-host-侧-scheduler_metadata-的生成与传入)。
 
-- v3 `flash_attn_varlen_func`（TND 打包 KV 与离线链布局编码不一致）；
-- v4 `flash_attn_func` / `flash_attn_varlen_func`（v4 离线链无 `qkv_dtype`，记录固定 BF16，
-  对 FP16 调用方会与实际张量 dtype 不一致）。
+唯一例外：v4 分页 MLA KV（布局 3/4）仍由 AICPU 现场生成（v4 离线链无 page size 入参，
+无法绑定页对齐容量）。
 
 回归：v3 MLA **1253 passed**、v4 MLA **105 passed**、训推一致性 **18 passed**、
 `test_torch_compile_fa3.py` 与基线一致（17 failed / 22 passed / 2 skipped，均为既有失败）。
