@@ -127,6 +127,7 @@ class FAInferKernel {
         // stays source-compatible while kvNewSeqlen remains zero.
         AscendC::GlobalTensor<ElementK>& gKNew;
         AscendC::GlobalTensor<ElementK>& gVNew;
+        AscendC::GlobalTensor<ElementQ>& gQv;
     };
 
     bool hasSeqUsedQ = false;
@@ -165,6 +166,10 @@ class FAInferKernel {
         kvHeads = fATilingData->kvHeads;
         embed = fATilingData->embeddingSize;
         embedV = fATilingData->embeddingSizeV;
+        // MLA absorbed decode: q/k carry only the rope half of the QK head dim
+        // (embed) and v the latent half (embedV); QK runs over [latent | rope].
+        mlaAbsorbed = params.qv != nullptr;
+        embedQK = mlaAbsorbed ? (embed + embedV) : embed;
         pagedBlockSize = fARuntimeData->blockSize;
         // Metadata may infer capacity from the used KV length. The page
         // table can reserve more pages or be a view with a larger stride.
@@ -200,6 +205,8 @@ class FAInferKernel {
 
         AscendC::GlobalTensor<ElementQ> gQ;
         gQ.SetGlobalBuffer((__gm__ ElementQ*)params.q);
+        AscendC::GlobalTensor<ElementQ> gQv;
+        gQv.SetGlobalBuffer((__gm__ ElementQ*)params.qv);
         AscendC::GlobalTensor<ElementK> gK;
         gK.SetGlobalBuffer((__gm__ ElementK*)params.k);
         AscendC::GlobalTensor<ElementK> gV;
@@ -247,7 +254,7 @@ class FAInferKernel {
 
         GlobalTensorBundle globalTensors{
             gQ,     gK,   gV, gMask, gBlockTable, gActualQseqlen, gActualKvseqlen, gO,        gLse,
-            gLseFD, gOFD, gS, gP,    gOTmp,       gOUpdate,       gSeqUsedQ,       gSeqUsedKv, gK, gV};
+            gLseFD, gOFD, gS, gP,    gOTmp,       gOUpdate,       gSeqUsedQ,       gSeqUsedKv, gK, gV, gQv};
 
         uint32_t coreIdx = AscendC::GetBlockIdx();
         uint32_t coreNum = AscendC::GetBlockNum();
@@ -273,12 +280,12 @@ class FAInferKernel {
 
         // D>256: Q resident + K/P shared 2-stage (256-wide slices) + V 2-stage
         // (128-wide slices) = 384 KB of the 512 KB L1 budget.
-        const bool headDimSplit = embed > NUM_256;
+        const bool headDimSplit = embedQK > NUM_256;
         // 256-wide slice (dSliceNum 4 -> 2). kPVDyn follows kDyn because the
         // K/P region is shared, and vSegLen follows the PV K chunk.
         uint32_t kDynNum = NUM_256;
         uint32_t nDynNum = NUM_128;
-        uint32_t qL1DynNum = RoundUp(embed, FaiKenel::BLOCK_SIZE);
+        uint32_t qL1DynNum = RoundUp(embedQK, FaiKenel::BLOCK_SIZE);
         uint32_t kPVDynNum = NUM_256;
         uint32_t vL1Stages = DOUBLE_BUFFER;
         uint32_t vSegLen = NUM_256;
@@ -303,7 +310,11 @@ class FAInferKernel {
         uint32_t L1_QK_SIZE = BlockMmadQK::L1TileShape::M * qL1DynNum * sizeof(ElementQ);
         blockMmadQK.SetPingPongState(&pingPongState);
         blockMmadPV.SetPingPongState(&pingPongState);
-        blockMmadQK.SetPageStride(fARuntimeData->keyPageStride);
+        // MLA absorbed: the QK K source is the latent cache (v), so QK pages use
+        // the value page stride; the rope tail's page stride is handed over per
+        // task in SetMlaRopeK.
+        keyPageStride = fARuntimeData->keyPageStride;
+        blockMmadQK.SetPageStride(mlaAbsorbed ? fARuntimeData->valuePageStride : fARuntimeData->keyPageStride);
         blockMmadPV.SetPageStride(fARuntimeData->valuePageStride);
         blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN, 0, qL1DynNum);
         blockMmadPV.init(resource, nDynNum, kPVDynNum, MAX_KV_STACK_LEN, L1_QK_SIZE, vL1Stages, vSegLen, vSliceWidth);
@@ -347,6 +358,8 @@ class FAInferKernel {
         if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
             strideQ = static_cast<uint64_t>(embed);
             qHeadStride = static_cast<uint64_t>(maxQSeqlen) * embed;
+            strideQv = static_cast<uint64_t>(embedV);
+            qvHeadStride = static_cast<uint64_t>(maxQSeqlen) * embedV;
             strideK = PAGED_CACHE_FLAG ? fARuntimeData->keyTokenStride : static_cast<uint64_t>(embed);
             strideV = PAGED_CACHE_FLAG ? fARuntimeData->valueTokenStride : static_cast<uint64_t>(embedV);
             kvHeadStrideK = PAGED_CACHE_FLAG ? fARuntimeData->keyHeadStride
@@ -356,6 +369,8 @@ class FAInferKernel {
         } else {
             strideQ = static_cast<uint64_t>(qHeads * embed);
             qHeadStride = static_cast<uint64_t>(embed);
+            strideQv = static_cast<uint64_t>(qHeads * embedV);
+            qvHeadStride = static_cast<uint64_t>(embedV);
             strideK = PAGED_CACHE_FLAG ? fARuntimeData->keyTokenStride : static_cast<uint64_t>(kvHeads * embed);
             strideV = PAGED_CACHE_FLAG ? fARuntimeData->valueTokenStride : static_cast<uint64_t>(kvHeads * embedV);
             kvHeadStrideK = PAGED_CACHE_FLAG ? fARuntimeData->keyHeadStride : static_cast<uint64_t>(embed);
@@ -589,6 +604,7 @@ class FAInferKernel {
         auto& gOUpdate = globalTensors.gOUpdate;
         auto& gKNew = globalTensors.gKNew;
         auto& gVNew = globalTensors.gVNew;
+        auto& gQv = globalTensors.gQv;
 
         const bool appendKVFlag = (kvNewSeqlen != 0U);
         // Per batch KV length from the caller, already includes the appended new KV
@@ -684,6 +700,18 @@ class FAInferKernel {
 
         uint64_t gmOffsetQ = qBOffset + static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideQ +
                              static_cast<uint64_t>(qNStartIdx) * qHeadStride;
+        // MLA absorbed: the latent query shares Q's token/head indexing but its own
+        // packed pitch. In BNSD the batch base must include the qHeads factor, like
+        // qBOffset above; BSND/TND use the plain token-stride form.
+        uint64_t qvBOffset;
+        if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
+            qvBOffset = static_cast<uint64_t>(BIdx) * qHeads * qvHeadStride;
+        } else {
+            qvBOffset = static_cast<uint64_t>(prevQSeqlenSum) * strideQv;
+        }
+        uint64_t gmOffsetQv = qvBOffset +
+                              static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideQv +
+                              static_cast<uint64_t>(qNStartIdx) * qvHeadStride;
         uint64_t gmOffsetK = kBOffset + static_cast<uint64_t>(kvNIdx) * kvHeadStrideK;
         uint64_t gmOffsetV = vBOffset + static_cast<uint64_t>(kvNIdx) * kvHeadStrideV;
         // newkv are (b, s_new, h_k, d); batch b starts at b * kvNewSeqlen tokens.
@@ -843,12 +871,24 @@ class FAInferKernel {
         // the Nd2Nz load as the source row distance): embed for BSND / TND,
         // maxQSeqlen * embed for BNSD. The token stride (distance between Q
         // token groups) is strideQ (qHeads * embed for BSND / TND, embed for BNSD).
-        LayoutQ layoutQTemp(rowNum, embed, static_cast<uint32_t>(qHeadStride));
+        LayoutQ layoutQTemp(rowNum, embedQK, static_cast<uint32_t>(qHeadStride));
         LayoutK layoutKTemp(strideK, stackSeqTile);
+        LayoutK layoutKLatent(strideV, stackSeqTile);
         LayoutV layoutVTemp(stackSeqTile, strideV);
         if (!isEmptyTask) {
             blockMmadQK.resetBlockStart(kvStart, pagedBlockSize);
-            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, static_cast<uint32_t>(strideQ));
+            if (mlaAbsorbed) {
+                // Absorbed decode: the rope query/K go in as the secondary
+                // sources and the latent ones through the primary operands.
+                blockMmadQK.SetMlaLatentDim(embedV);
+                blockMmadQK.SetMlaLatentQ(static_cast<uint32_t>(qvHeadStride), static_cast<uint32_t>(strideQv));
+                blockMmadQK.SetMlaRopeQ(gQ[gmOffsetQ], static_cast<uint32_t>(qHeadStride),
+                                        static_cast<uint32_t>(strideQ));
+                blockMmadQK.SetMlaRopeK(gK[gmOffsetK], static_cast<uint32_t>(strideK), keyPageStride);
+                blockMmadQK.loadQGM(gQv[gmOffsetQv], layoutQTemp, rowNum, qNBlockSize, static_cast<uint32_t>(strideQv));
+            } else {
+                blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, static_cast<uint32_t>(strideQ));
+            }
         }
 #endif
         for (uint32_t kvSIdx = kvStart; kvSIdx < kvEnd + pipelineDrain; kvSIdx++) {
@@ -898,22 +938,29 @@ class FAInferKernel {
                 desc.qNStartIdx = qNStartIdx;
                 uint64_t gmOffsetS = static_cast<uint64_t>(coreIdx * WORKSPACE_BLOCK_SIZE_DB * STACK_SLOTS +
                                                            curStackTileMod * WORKSPACE_BLOCK_SIZE_DB);
-                GemmCoord actualBlockShapeQK{rowNum, desc.stackSeqTile, embed};
+                GemmCoord actualBlockShapeQK{rowNum, desc.stackSeqTile, embedQK};
                 LayoutS layOutS(rowNum, desc.stackSeqTile, stackSeqTilePad);
 #ifdef __DAV_C220_CUBE__
+                // MLA absorbed: the latent half of the QK K operand is the value
+                // cache, so the QK source tensor, layout and token stride are the
+                // PV ones. The rope tail is picked per head-dim slice inside the
+                // QK block from the separately registered rope K.
+                AscendC::GlobalTensor<ElementK> gQKSrcLatent = mlaAbsorbed ? gV[gmOffsetV] : gQKSrc[qkSrcOffset];
+                LayoutK layoutQKSrc = mlaAbsorbed ? layoutKLatent : layoutKTemp;
+                const uint32_t qkStrideKV = mlaAbsorbed ? static_cast<uint32_t>(strideV) : strideK;
                 // Newkv blocks read the contiguous k_new tensor and write back
                 // into the cache (page-addressed when paged); old blocks read
                 // the cache via the page table.
                 if constexpr (PAGED_CACHE_FLAG) {
-                    blockMmadQK(gQ[gmOffsetQ], gQKSrc[qkSrcOffset], gS[gmOffsetS],
-                                isAppendBlock ? gBlockTable : gBlockTable[blockBOffset], layoutQTemp, layoutKTemp,
-                                layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize, strideK,
-                                doCopyback, gK[gmOffsetK], qkCacheOffset, gBlockTable,
+                    blockMmadQK(gQ[gmOffsetQ], gQKSrcLatent, gS[gmOffsetS],
+                                isAppendBlock ? gBlockTable : gBlockTable[blockBOffset], layoutQTemp, layoutQKSrc,
+                                layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize,
+                                qkStrideKV, doCopyback, gK[gmOffsetK], qkCacheOffset, gBlockTable,
                                 isAppendBlock ? pagedBlockSize : 0U, static_cast<uint32_t>(blockBOffset));
                 } else {
-                    blockMmadQK(gQ[gmOffsetQ], gQKSrc[qkSrcOffset], gS[gmOffsetS], gBlockTable, layoutQTemp,
-                                layoutKTemp, layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize,
-                                strideK, doCopyback, gK[gmOffsetK], qkCacheOffset);
+                    blockMmadQK(gQ[gmOffsetQ], gQKSrcLatent, gS[gmOffsetS], gBlockTable, layoutQTemp,
+                                layoutQKSrc, layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize,
+                                qkStrideKV, doCopyback, gK[gmOffsetK], qkCacheOffset);
                 }
                 if (kvSIdx == kvEnd - 1) {
                     AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
@@ -1056,7 +1103,7 @@ class FAInferKernel {
 #endif
 #ifdef __DAV_C220_VEC__
                 LayoutO layoutO(pvDesc.qSeqlen, static_cast<uint32_t>(oRowStride));
-                LayoutUpdate layoutUpdate(pvDesc.rowNum, embed, embedRound);
+                LayoutUpdate layoutUpdate(pvDesc.rowNum, embedV, embedRoundV);
                 // Head-major LSE: (num_heads, headStride). stride(0)=headStride is
                 // maxQSeqlen (BSND) or totalQTokens (TND) — the correct per-layout head
                 // stride, so rescale_o.hpp's gLse[qNIdx * layoutLse.stride(0)] lands right.
@@ -1065,7 +1112,7 @@ class FAInferKernel {
 
                 if (flashDecodeFlag != 0U) {
                     LayoutLse layoutgmLse(pvDesc.qSBlockSize, pvDesc.qNBlockSize);
-                    LayoutLse layoutgmLo(pvDesc.qSBlockSize, embed * pvDesc.qNBlockSize);
+                    LayoutLse layoutgmLo(pvDesc.qSBlockSize, embedV * pvDesc.qNBlockSize);
                     typename EpilogueRescaleO::SplitKVParams splitParams;
                     splitParams.isSplitkv = pvDesc.isSplitKV;
                     splitParams.gCombineLse = gLseFD[pvDesc.gmOffsetLseFD];
@@ -1108,6 +1155,9 @@ class FAInferKernel {
     uint32_t kvHeads;
     uint32_t embed;
     uint32_t embedV;
+    // MLA absorbed decode: QK runs over [latent(embedV) | rope(embed)].
+    bool mlaAbsorbed = false;
+    uint32_t embedQK = 0;
     uint32_t pagedBlockSize;
     uint64_t blockTableStride;
     uint32_t maxNumBlocksPerBatch;
@@ -1135,6 +1185,11 @@ class FAInferKernel {
     // Per-head plane pitches (layout dependent).
     uint64_t qHeadStride;
     uint64_t oHeadStride;
+    // MLA absorbed: packed pitch of the latent query.
+    uint64_t strideQv;
+    uint64_t qvHeadStride;
+    // MLA absorbed: page stride of the rope K cache (latent K uses the value one).
+    uint64_t keyPageStride;
     uint64_t kvHeadStrideK;
     uint64_t kvHeadStrideV;
     // Output row pitch: qHeads * embedV (contiguous BSND for every input layout).
@@ -1164,7 +1219,8 @@ template <typename InputDtypeQ = half, typename InputDtypeKv = half, typename In
 __global__ __aicore__ void
 FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
         GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling, GM_ADDR runtime,
-        uint64_t blockTableStride, GM_ADDR seqUsedQ, GM_ADDR seqUsedKv, int64_t kvSeqlenAllocated, GM_ADDR sink)
+        uint64_t blockTableStride, GM_ADDR seqUsedQ, GM_ADDR seqUsedKv, int64_t kvSeqlenAllocated, GM_ADDR sink,
+        GM_ADDR qv = nullptr)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
 
@@ -1224,7 +1280,7 @@ FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADD
 
     FAIKernelParams params{
         q,   k,         v,      mask,    blockTables,      actualQseqlen, actualKvseqlen, o,
-        lse, workspace, tiling, runtime, blockTableStride, seqUsedQ,      seqUsedKv,      kvSeqlenAllocated, sink};
+        lse, workspace, tiling, runtime, blockTableStride, seqUsedQ,      seqUsedKv,      kvSeqlenAllocated, sink, qv};
     FAInferKernelType flashAttnInfer;
     flashAttnInfer(params);
 }

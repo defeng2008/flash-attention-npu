@@ -26,7 +26,7 @@
                        Catlass::Epilogue::LseModeT::OUT_ONLY, SOFTCAP><<<launchBlockDim, nullptr, aclStream>>>(        \
         fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice,      \
         kvSeqDevice, workspaceDevice, tiling, kNewDevice, vNewDevice, sequsedQDevice, sequsedKVDevice,                 \
-        kvSeqlenAllocated)
+        kvSeqlenAllocated, qvDevice)
 
 // BOOL_SWITCH-style helper (idea from static_switch.h in flash-attention): each
 // branch fixes the runtime bool as a named constexpr flag, so the dispatch
@@ -91,6 +91,7 @@ void launch_fwd_dtype(const FwdLaunchArgs& a)
     uint8_t* sequsedQDevice = a.sequsedQDevice;
     uint8_t* sequsedKVDevice = a.sequsedKVDevice;
     const int64_t kvSeqlenAllocated = a.kv_seqlen_allocated;
+    uint8_t* qvDevice = a.qvDevice;
     FWD_BOOL_SWITCH(paged_KV, IsPaged, {
         FWD_BOOL_SWITCH(flashDecodeFlag, IsFlashDecode, {
             FWD_MASK_SWITCH(is_local, is_causal, MaskType, {

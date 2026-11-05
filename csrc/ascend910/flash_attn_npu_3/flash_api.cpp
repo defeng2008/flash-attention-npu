@@ -185,7 +185,6 @@ std::vector<at::Tensor> mha_fwd(
         TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4, "BNSD layout requires 4-dimensional q/k/v");
         TORCH_CHECK(!page_table_.has_value(), "BNSD layout does not support paged KV cache");
         TORCH_CHECK(!k_new_.has_value() && !v_new_.has_value(), "BNSD layout does not support append-KV");
-        TORCH_CHECK(!q_v_.has_value(), "BNSD layout does not support a separate q_v tensor");
     }
 
     if (cu_seqlens_q_.has_value()) {
@@ -357,14 +356,43 @@ std::vector<at::Tensor> mha_fwd(
     // D=512 follows the same layout/KV routing matrix as the original path:
     // varlen-Q selects TND and BSND otherwise; paged K/V and dense/varlen K/V
     // are selected independently by page_table/cu_seqlens_k.
+    // MLA (Multi-head Latent Attention) forwards allow the value head dim to
+    // differ from the query/key head dim. Two shapes are accepted:
+    //   unabsorbed prefill: q/k = (.., 192), v = (.., 128)
+    //   absorbed decode    : q = (.., 64), q_v = (.., 512), k = (.., 64), v = (.., 512)
+    // Everything else keeps the original q/k/v head dims equal.
+    const bool has_q_v = q_v_.has_value();
+    int head_size_v = head_size_og;
+    if (has_q_v) {
+        const at::Tensor& q_v = q_v_.value();
+        TORCH_CHECK(q_v.dtype() == q_dtype, "q_v must have the same dtype as q");
+        TORCH_CHECK(q_v.is_contiguous(), "Input tensor q_v must be contiguous because FA3 uses packed Qv strides");
+        TORCH_CHECK(q_v.size(-1) == v.size(-1),
+                    "q_v and v must share the same last (latent) dimension; got q_v=", q_v.size(-1),
+                    " and v=", v.size(-1));
+        head_size_v = static_cast<int>(q_v.size(-1));
+    } else {
+        head_size_v = static_cast<int>(v.size(-1));
+    }
+    // MLA is selected from the shape signature: an explicit q_v tensor, or a
+    // value head dim that differs from the query/key head dim.
+    const bool is_mla = has_q_v || (head_size_og != head_size_v);
+    if (is_mla) {
+        TORCH_CHECK(!appendKV, "MLA forward does not support append-KV (k_new/v_new)");
+        TORCH_CHECK(!has_q_v || head_size_og <= 256, "MLA absorbed decode requires a query head dim <= 256");
+    }
     if (head_size_og > 256) {
         TORCH_CHECK(head_size_og == 512, "FlashAttention only supports head dimension at most 256, or exactly 512");
     } else {
         TORCH_CHECK(head_size_og >= 1 && head_size_og <= 256,
                     "FlashAttention only supports head dimension in [1, 256]");
     }
+    if (is_mla) {
+        TORCH_CHECK(head_size_v >= 1 && head_size_v <= 512,
+                    "MLA value head dimension must be in [1, 512]; got ", head_size_v);
+    }
     TORCH_CHECK(k.size(-1) == head_size_og, "query and key must have the same head dimension");
-    TORCH_CHECK(v.size(-1) == head_size_og, "query and value must have the same head dimension");
+    TORCH_CHECK(is_mla || v.size(-1) == head_size_og, "query and value must have the same head dimension");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
     if (out_.has_value()) {
@@ -374,7 +402,14 @@ std::vector<at::Tensor> mha_fwd(
     } else if (is_bnsd) {
         // BNSD (B,H,S,D) input: the kernel reads BNSD but writes contiguous BSND, so
         // allocate the output as (B, S, H, dv) instead of empty_like(q) == (B,H,S,D).
-        out = torch::empty({batch_size, seqlen_q, num_heads, head_size_og}, q.options());
+        // MLA's value head dim differs from q's, so use head_size_v (equal for non-MLA).
+        out = torch::empty({batch_size, seqlen_q, num_heads, static_cast<int64_t>(head_size_v)}, q.options());
+    } else if (is_mla) {
+        // MLA output uses the value (latent) head dim, which differs from q's.
+        // Keep q's rank/layout: BSND (B,S,H,dv) and packed TND (total,H,dv).
+        auto out_sizes = q.sizes().vec();
+        out_sizes.back() = head_size_v;
+        out = torch::empty(out_sizes, q.options());
     } else {
         out = torch::empty_like(q);
     }
@@ -532,7 +567,7 @@ std::vector<at::Tensor> mha_fwd(
             const int64_t rowBlocksUpper =
                 (coreNum == 0 || kvGroups == 0) ? 0 : std::min(2 * coreNum, kvGroups + coreNum - 1);
             const int64_t partialRowsUpper = fa_split::Q_TILE_CEIL * rowBlocksUpper;
-            wsSplit = partialRowsUpper * (static_cast<int64_t>(head_size_og) + 1) * sizeof(float);
+            wsSplit = partialRowsUpper * (static_cast<int64_t>(head_size_v) + 1) * sizeof(float);
         }
         workspace_tensor = at::empty({wsBase + wsSplit}, at::device(at::kPrivateUse1).dtype(at::kByte));
         launchBlockDim = blockDim;
@@ -564,7 +599,9 @@ std::vector<at::Tensor> mha_fwd(
         tiling_cpu_ptr->set_numHeads(static_cast<uint32_t>(num_heads));
         tiling_cpu_ptr->set_kvHeads(static_cast<uint32_t>(num_heads_k));
         tiling_cpu_ptr->set_embeddingSize(static_cast<uint32_t>(head_size_og));
-        tiling_cpu_ptr->set_embeddingSizeV(static_cast<uint32_t>(head_size_og));
+        // MLA: q/k head dim and value head dim differ; the kernel already keeps
+        // them as independent runtime dims (embed / embedV).
+        tiling_cpu_ptr->set_embeddingSizeV(static_cast<uint32_t>(head_size_v));
         tiling_cpu_ptr->set_numBlocks(static_cast<uint32_t>(num_blocks));
         tiling_cpu_ptr->set_blockSize(static_cast<uint32_t>(page_block_size));
         tiling_cpu_ptr->set_maxNumBlocksPerBatch(static_cast<uint32_t>(max_num_blocks_per_seq));
@@ -644,7 +681,7 @@ std::vector<at::Tensor> mha_fwd(
         splitCtx.num_heads = num_heads;
         splitCtx.num_heads_k = num_heads_k;
         splitCtx.seqlen_q = seqlen_q;
-        splitCtx.head_size_v = head_size_og;
+        splitCtx.head_size_v = head_size_v;
         splitCtx.seqlens_q_cpu = seqlens_q_cpu;
         splitCtx.seqlens_k_cpu = seqlens_k_cpu;
         splitCtx.blockDim = blockDim;
@@ -762,6 +799,8 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;
     fwd_args.sequsedQDevice = seqused_q_.has_value() ? static_cast<uint8_t*>(seqused_q_.value().data_ptr()) : nullptr;
     fwd_args.sequsedKVDevice = seqused_k_.has_value() ? static_cast<uint8_t*>(seqused_k_.value().data_ptr()) : nullptr;
+    // MLA absorbed decode: the latent (nope) query half; nullptr keeps the non-MLA QK head dim.
+    fwd_args.qvDevice = has_q_v ? static_cast<uint8_t*>(q_v_.value().data_ptr()) : nullptr;
     fwd_args.qDevice = qDevice;
     fwd_args.kDevice = kDevice;
     fwd_args.vDevice = vDevice;

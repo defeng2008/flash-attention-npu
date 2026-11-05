@@ -57,6 +57,7 @@ struct FwdLaunchArgs {
     FAInferTilingParams tiling;
     uint8_t* sequsedQDevice;  // per-batch used Q lengths; nullptr when absent
     uint8_t* sequsedKVDevice; // per-batch used KV lengths; nullptr when absent
+    uint8_t* qvDevice;        // MLA absorbed latent query; nullptr selects non-MLA
 };
 
 // Per-(dtype, layout) implementation, defined in autogen/fwd_dispatch_<dtype>_<layout>.cpp

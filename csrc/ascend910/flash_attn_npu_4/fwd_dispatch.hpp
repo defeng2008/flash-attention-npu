@@ -55,6 +55,7 @@ struct FwdLaunchArgs {
     uint8_t* sequsedQDevice;
     uint8_t* sequsedKVDevice;
     uint8_t* sinkDevice; // nullptr disables learnable_sink
+    uint8_t* qvDevice;   // MLA absorbed latent query; nullptr selects non-MLA
 };
 
 // Per-(dtype, layout) implementation, defined in autogen/fwd_dispatch_<dtype>_<layout>.cpp
