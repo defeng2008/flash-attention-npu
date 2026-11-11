@@ -120,6 +120,17 @@ static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor
     return meta;
 }
 
+// MLA absorbed decode fast path: one query token per sequence, a single KV head,
+// a 512-wide latent value and a 64-wide rope part (head_size_og + head_size_v ==
+// 576). Paged KV, windows and causal masks keep the generic FAInfer path.
+inline bool IsMlaDecodeGemvShape(bool has_q_v, int64_t num_heads, int64_t num_heads_k, int64_t head_size_og,
+                                 int64_t head_size_v, bool paged_KV, bool is_local, bool is_causal, int64_t seqlen_q,
+                                 int64_t kv_len)
+{
+    return has_q_v && num_heads >= 16 && num_heads_k == 1 && head_size_v == 512 && head_size_og + head_size_v == 576 &&
+           !paged_KV && !is_local && !is_causal && seqlen_q == 1 && kv_len >= 128;
+}
+
 std::vector<at::Tensor> mha_fwd(
     at::Tensor q, // (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
     at::Tensor
@@ -408,7 +419,20 @@ std::vector<at::Tensor> mha_fwd(
     // graph capture forbids synchronized memcpy), so it falls back to the
     // non-D2H bound that the metadata producer used. Only the host-tiling path
     // reads exact per-batch lengths, matching how they are consumed below.
-    const bool use_explicit_metadata = scheduler_metadata_.has_value();
+    // MLA absorbed decode is served by the dedicated gemv kernel, which consumes the
+    // host-built tiling tables (coreInfo/splitInfo). Bypass the explicit
+    // scheduler-metadata path even when a metadata buffer was supplied. A window-free
+    // call cannot be turned into causal/local by NormalizeAttentionWindow below, so
+    // deciding here (before is_causal/is_local are normalized) is safe.
+    const bool gemvWindowFree = window_size_left < 0 && window_size_right < 0;
+    const int64_t gemvKvLen =
+        is_varlen_q ? max_seqlen_k_.value_or(0)
+                    : (is_bnsd_layout ? static_cast<int64_t>(k.size(2)) : static_cast<int64_t>(k.size(1)));
+    const bool mlaDecodeGemvShape =
+        gemvWindowFree &&
+        IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v, paged_KV, is_local,
+                             is_causal, seqlen_q, gemvKvLen);
+    const bool use_explicit_metadata = scheduler_metadata_.has_value() && !mlaDecodeGemvShape;
     int32_t* seqlens_q_cpu = nullptr;
     at::Tensor seqlens_q_cpu_tensor;
     at::Tensor seqlens_k_cpu_tensor;
@@ -493,7 +517,7 @@ std::vector<at::Tensor> mha_fwd(
     }
     runtimeDevice = static_cast<uint8_t*>(runtime_gpu_tensor.data_ptr());
 
-    if (scheduler_metadata_.has_value()) {
+    if (use_explicit_metadata) {
         auto schedMd = scheduler_metadata_.value();
         TORCH_CHECK(schedMd.dtype() == at::kByte, "scheduler_metadata must be a byte tensor");
         TORCH_CHECK(schedMd.is_contiguous(), "scheduler_metadata must be contiguous");
@@ -624,7 +648,17 @@ std::vector<at::Tensor> mha_fwd(
         splitCtx.seqlens_k_cpu = seqlens_k_cpu;
         splitCtx.blockDim = blockDim;
         splitCtx.num_splits = static_cast<int32_t>(num_splits);
-        if (flashDecodeFlag) {
+        if (mlaDecodeGemvShape) {
+            // The gemv kernel splits the KV cache itself into 128-token tiles; the
+            // generic flash-decode tiling does not apply and would fight it.
+            flashDecodeFlag = false;
+            tiling_cpu_ptr->set_flashDecodeFlag(0U);
+            fa_split::splitKvForGemvDecode(tiling_cpu_ptr, splitCtx);
+            auto needCoreNum = tiling_cpu_ptr->get_needCoreNum();
+            if (needCoreNum != 0) {
+                launchBlockDim = needCoreNum;
+            }
+        } else if (flashDecodeFlag) {
             fa_split::splitBN2S1GS2(tiling_cpu_ptr, splitCtx);
             auto needCoreNum = tiling_cpu_ptr->get_needCoreNum();
             if (needCoreNum != 0) {
@@ -645,7 +679,9 @@ std::vector<at::Tensor> mha_fwd(
 
         workspace_tensor = at::empty({workSpaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
         // Empty FD splits never write partials; init like FA GPU (O=0, LSE=-inf).
-        if (flashDecodeFlag && (splitLseTotalSize > 0 || splitOTotalSize > 0)) {
+        // The gemv path has the same contract for its split batches (flashDecodeFlag
+        // itself is cleared for it, so test the gate separately).
+        if ((flashDecodeFlag || mlaDecodeGemvShape) && (splitLseTotalSize > 0 || splitOTotalSize > 0)) {
             auto float_opts = workspace_tensor.options().dtype(at::kFloat);
             if (splitLseTotalSize > 0) {
                 TORCH_CHECK(splitLseTotalSize % sizeof(float) == 0,
@@ -730,6 +766,7 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.is_local = is_local;
     fwd_args.flashDecodeFlag = flashDecodeFlag;
     fwd_args.has_softcap = has_softcap;
+    fwd_args.mlaDecodeGemv = mlaDecodeGemvShape;
     fwd_args.layout = is_bnsd_layout ? FaiKenel::inputLayout::BNSD
                                      : (is_tnd_layout ? FaiKenel::inputLayout::TND : FaiKenel::inputLayout::BSND);
     fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;

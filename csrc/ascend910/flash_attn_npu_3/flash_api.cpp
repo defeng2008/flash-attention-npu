@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -96,6 +97,19 @@ static FwdMaskDerivation DeriveFwdMask(bool causal, int64_t window_left, int64_t
                                         : (derived.is_causal ? static_cast<uint32_t>(FaiKenel::MaskType::MASK_CAUSAL)
                                                              : static_cast<uint32_t>(FaiKenel::MaskType::NO_MASK));
     return derived;
+}
+
+static bool IsMlaDecodeGemvShape(bool hasQv, int64_t numHeads, int64_t numHeadsK, int64_t headSizeOg,
+                                 int64_t headSizeV, bool pagedKv, bool isLocal, bool isCausal, int64_t seqlenQ,
+                                 int64_t kvLen)
+{
+    // M < 16 leaves the Q tile padded to a full fractal, which the shared
+    // 128-tile Q loader does not lay out; keep those shapes on FAInfer.
+    // Packed TND (varlen-q) decode is accepted too: one query token per sequence
+    // makes the packed q/qv/output batch bases exactly the cu_seqlens prefixes,
+    // which the kernel reads through params.actualQseqlen.
+    return hasQv && (numHeads >= 16) && (numHeadsK == 1) && (headSizeV == 512) && (headSizeOg + headSizeV == 576) &&
+           !pagedKv && !isLocal && !isCausal && (seqlenQ == 1) && (kvLen >= 128);
 }
 
 static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor& seqlensK,
@@ -468,6 +482,10 @@ std::vector<at::Tensor> mha_fwd(
     uint8_t* tilingDevice = nullptr;
     uint8_t* maskDevice = nullptr;
     bool flashDecodeFlag = false;
+    // Dedicated absorbed-MLA decode kernel. Only the host-tiling branch (no
+    // precomputed scheduler_metadata) computes and sets this; the AICPU
+    // metadata schedule has no 128-token KV-split geometry.
+    bool mlaDecodeGemv = false;
     bool is_local = false;
     bool has_softcap = (softcap > 0.0f);
 
@@ -485,7 +503,22 @@ std::vector<at::Tensor> mha_fwd(
         return {out, softmaxlse, out_accum, softmax_lse_accum};
     }
 
-    if (scheduler_metadata_.has_value()) {
+    // Dedicated absorbed-MLA decode GEMV: its 128-token KV-split geometry is built
+    // host-side (see splitKvForGemvDecode below), so a gemv-eligible call must take
+    // the host-tiling branch even when a scheduler_metadata is supplied. The
+    // training entry points (flash_attn_func) always supply one, and the AICPU
+    // schedule carries no 128-token geometry, so without this reroute those calls
+    // would silently stay on the generic FAInfer path.
+    // Packed TND has no per-batch KV length axis (k is (total_kv, Hk, D)), so the
+    // gate length comes from the caller's max_seqlen_k.
+    const int64_t gemvKvLenEarly =
+        is_varlen_q ? (max_seqlen_k_.has_value() ? max_seqlen_k_.value() : 0)
+                    : (is_bnsd ? k.size(2) : k.size(1));
+    const bool gemvShapeEarly =
+        IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v, paged_KV,
+                             is_local, is_causal, seqlen_q, gemvKvLenEarly);
+
+    if (scheduler_metadata_.has_value() && !gemvShapeEarly) {
         auto schedMd = scheduler_metadata_.value();
         TORCH_CHECK(schedMd.dtype() == at::kByte, "scheduler_metadata must be a byte tensor");
         TORCH_CHECK(schedMd.is_contiguous(), "scheduler_metadata must be contiguous");
@@ -509,6 +542,12 @@ std::vector<at::Tensor> mha_fwd(
         is_causal = maskDer.is_causal;
         is_local = maskDer.is_local;
         const bool hasMask = maskDer.maskType != static_cast<uint32_t>(FaiKenel::MaskType::NO_MASK);
+        // Dense absorbed MLA decode uses the same FD split unit as paged KV (one
+        // 512-row stack block), so it needs the partial O/LSE workspace as well.
+        const bool denseMlaFd = !paged_KV && !is_varlen_q && !is_local && has_q_v && (num_heads_k == 1) &&
+                                (head_size_v == 512) && (head_size_og + head_size_v == 576) && (kvNewSeqlen == 0) &&
+                                (seqlen_q * (num_heads / std::max<int64_t>(num_heads_k, 1)) <= 128) &&
+                                (seqlen_q <= 16) && (kvSeqlenBound >= 1024) && (num_splits > 1);
         // FlashDecode requires at least 1024 KV tokens. For paged KV, the
         // page-table capacity bounds every valid used length, including append.
         // Skip the device-to-host length reads when FD is impossible; those
@@ -546,6 +585,9 @@ std::vector<at::Tensor> mha_fwd(
             flashDecodeFlag = (maxQ * fdGroupSize <= 128) && (maxQ <= 16) && (maxKvSeqlen >= 1024) && (minQ > 0) &&
                               (fdLongSeq || fdShortSeq);
         }
+        // The launch variant follows this host flag, not the AICPU tiling, so
+        // dense FD has to be mirrored here as well.
+        flashDecodeFlag = flashDecodeFlag || denseMlaFd;
         TORCH_CHECK(static_cast<uint64_t>(schedMd.nbytes()) == fa_metadata::MetadataBytes(hasMask),
                     "scheduler_metadata buffer size must exactly match this call's "
                     "causal/window-derived layout");
@@ -557,7 +599,7 @@ std::vector<at::Tensor> mha_fwd(
         }
         int64_t wsBase = static_cast<int64_t>(fa_metadata::WorkSpaceSize(blockDim));
         int64_t wsSplit = 0;
-        if (paged_KV && is_varlen_q && !is_local) {
+        if ((paged_KV && is_varlen_q && !is_local) || denseMlaFd) {
             // FD has at most 128 rows per (batch, KV head), and each internal
             // core boundary adds at most 128 partial rows. Independently, each
             // core has at most two partial Q/head tiles. Bound both without
@@ -668,11 +710,31 @@ std::vector<at::Tensor> mha_fwd(
         const bool isLongSeq = (static_cast<double>(numTasks) <= 0.8 * blockDim) &&
                                (maxKVSeqlenCalc >= static_cast<int64_t>(blockDim) * 512);
         const bool isShortSeq = (static_cast<double>(numTasks) <= 0.4 * blockDim) && (maxKVSeqlenCalc >= 1024);
-        TORCH_CHECK(num_splits <= 1 || (paged_KV && is_varlen_q),
+        // Dense absorbed MLA decode shares the FD geometry (512-row stack blocks).
+        const bool denseMlaFd = !paged_KV && !is_varlen_q && !is_local && has_q_v && (num_heads_k == 1) &&
+                                (head_size_v == 512) && (head_size_og + head_size_v == 576) && (kvNewSeqlen == 0) &&
+                                (maxQSeqlenCalc * groupSize <= 128) && (maxQSeqlenCalc <= 16) &&
+                                (maxKVSeqlenCalc >= 1024) && (num_splits > 1);
+        // Dedicated absorbed-MLA decode kernel (128-token KV tiles). Selection is
+        // purely shape driven.
+        // Packed TND has no per-batch KV length axis (k is (total_kv, Hk, D)), so
+        // its gate length is the longest used sequence.
+        const int64_t decodeKvLenHost =
+            is_varlen_q ? static_cast<int64_t>(max_kv_seqlen) : (is_bnsd ? k.size(2) : k.size(1));
+        const bool mlaDecodeGemvShape =
+            IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v, paged_KV,
+                                 is_local, is_causal, seqlen_q, decodeKvLenHost);
+        mlaDecodeGemv = mlaDecodeGemvShape;
+        TORCH_CHECK(num_splits <= 1 || (paged_KV && is_varlen_q) || denseMlaFd || mlaDecodeGemv,
                     "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
-        flashDecodeFlag = paged_KV && is_varlen_q && !is_local && (maxQSeqlenCalc * groupSize <= 128) &&
+        flashDecodeFlag = (paged_KV && is_varlen_q && !is_local && (maxQSeqlenCalc * groupSize <= 128) &&
                           (maxQSeqlenCalc <= 16) && (maxKVSeqlenCalc >= 1024) && (minQSeqlenCalc > 0) &&
-                          (isLongSeq || isShortSeq);
+                          (isLongSeq || isShortSeq)) || denseMlaFd;
+        if (mlaDecodeGemv) {
+            // The dedicated kernel has its own 128-token KV split; the generic FD
+            // geometry does not apply.
+            flashDecodeFlag = false;
+        }
         tiling_cpu_ptr->set_flashDecodeFlag(flashDecodeFlag ? 1U : 0U);
         tiling_cpu_ptr->set_numSplits(num_splits > 0 ? static_cast<uint32_t>(num_splits) : 1U);
 
@@ -687,12 +749,24 @@ std::vector<at::Tensor> mha_fwd(
         splitCtx.blockDim = blockDim;
         splitCtx.num_splits = static_cast<int32_t>(num_splits);
         splitCtx.kvNewSeqlen = appendKV ? static_cast<int32_t>(kvNewSeqlen) : 0;
-        if (flashDecodeFlag) {
+        if (mlaDecodeGemv) {
+            // One task per core: a contiguous run of 128-token KV segments.
+            fa_split::splitKvForGemvDecode(tiling_cpu_ptr, splitCtx);
+            auto needCoreNum = tiling_cpu_ptr->get_needCoreNum();
+            launchBlockDim = (needCoreNum != 0) ? needCoreNum : 1U;
+        } else if (flashDecodeFlag) {
             fa_split::splitBN2S1GS2(tiling_cpu_ptr, splitCtx);
             auto needCoreNum = tiling_cpu_ptr->get_needCoreNum();
             if (needCoreNum != 0) {
                 launchBlockDim = needCoreNum;
             }
+        } else if (has_q_v && (num_heads_k == 1) && (head_size_v == 512) && (head_size_og + head_size_v == 576) &&
+                   (totalTaskNum != 0U) && (totalTaskNum < blockDim)) {
+            // Dense absorbed MLA decode collapses to very few tasks; launching all
+            // AIC blocks only adds dispatch/drain ramp for cores with no task.
+            // Non-FD task loop already strides by GetBlockNum(), so launching
+            // exactly totalTaskNum blocks keeps the mapping 1:1.
+            launchBlockDim = totalTaskNum;
         }
 
         uint64_t WORKSPACE_BLOCK_SIZE_DB = 128 * 512;
@@ -703,20 +777,26 @@ std::vector<at::Tensor> mha_fwd(
         uint64_t UpdateSize = static_cast<uint64_t>(blockDim) * WORKSPACE_BLOCK_SIZE_DB * 4 * PRELANCH_NUM;
         uint64_t splitLseTotalSize = tiling_cpu_ptr->get_splitLseTotalSize();
         uint64_t splitOTotalSize = tiling_cpu_ptr->get_splitOTotalSize();
+        // The dedicated gemv kernel keeps its scratch tables at the front of the
+        // workspace (bound from mm1OutSize / ... in the kernel), so its FD partials
+        // live past them. The generic FAInfer path keeps partials at offset 0.
+        uint64_t partialBase =
+            mlaDecodeGemv ? (mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize) : 0U;
         int64_t workSpaceSize = static_cast<int64_t>(mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize +
                                                      splitLseTotalSize + splitOTotalSize);
 
         workspace_tensor = at::empty({workSpaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
         // Empty FD splits (split \cap window == ∅) never write partials; init like FA GPU
         // (Oaccum=0, LSEaccum=-inf) so CombineScale ignores them.
-        if (flashDecodeFlag && (splitLseTotalSize > 0 || splitOTotalSize > 0)) {
+        if ((flashDecodeFlag || mlaDecodeGemv) && (splitLseTotalSize > 0 || splitOTotalSize > 0)) {
             auto float_opts = workspace_tensor.options().dtype(at::kFloat);
             if (splitLseTotalSize > 0) {
                 TORCH_CHECK(splitLseTotalSize % sizeof(float) == 0,
                             "splitLseTotalSize must be a multiple of sizeof(float)");
                 at::Tensor lse_init = at::full({static_cast<int64_t>(splitLseTotalSize / sizeof(float))},
                                                -std::numeric_limits<float>::infinity(), float_opts);
-                workspace_tensor.narrow(/*dim=*/0, /*start=*/0, static_cast<int64_t>(splitLseTotalSize))
+                workspace_tensor.narrow(/*dim=*/0, /*start=*/static_cast<int64_t>(partialBase),
+                                        static_cast<int64_t>(splitLseTotalSize))
                     .copy_(lse_init.view(at::kByte));
             }
             if (splitOTotalSize > 0) {
@@ -724,7 +804,8 @@ std::vector<at::Tensor> mha_fwd(
                             "splitOTotalSize must be a multiple of sizeof(float)");
                 at::Tensor o_init = at::zeros({static_cast<int64_t>(splitOTotalSize / sizeof(float))}, float_opts);
                 workspace_tensor
-                    .narrow(/*dim=*/0, static_cast<int64_t>(splitLseTotalSize), static_cast<int64_t>(splitOTotalSize))
+                    .narrow(/*dim=*/0, static_cast<int64_t>(partialBase + splitLseTotalSize),
+                            static_cast<int64_t>(splitOTotalSize))
                     .copy_(o_init.view(at::kByte));
             }
         }
@@ -783,6 +864,37 @@ std::vector<at::Tensor> mha_fwd(
     // template argument is selected from the host `layout` code; dtype and
     // paged/causal and the FlashDecode specialization are resolved in dispatch.
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
+    // Dense absorbed MLA decode collapses to very few tasks (one for the
+    // canonical S=1 decode). Launching every AIC block only adds dispatch and
+    // teardown ramp for cores that never receive a task; the non-FD task loop
+    // strides by GetBlockNum(), so launching exactly the task count keeps the
+    // 1:1 mapping.
+    if (!mlaDecodeGemv && has_q_v && (num_heads_k == 1) && (head_size_v == 512) &&
+        (head_size_og + head_size_v == 576) && (batch_size > 0)) {
+        const int64_t kvGroups = batch_size * num_heads_k;
+        if (!flashDecodeFlag && !is_varlen_q && (seqlen_q > 0)) {
+            const uint32_t groupSizeHost = static_cast<uint32_t>(num_heads / std::max<int64_t>(num_heads_k, 1));
+            const uint32_t qLen = static_cast<uint32_t>(seqlen_q);
+            const uint32_t qnTile = fa_split::GetQNBlockTile(qLen, groupSizeHost);
+            const uint32_t qsTile = fa_split::GetQSBlockTile(0);
+            const uint64_t qnBlocks = static_cast<uint64_t>((groupSizeHost + qnTile - 1) / qnTile) * num_heads_k;
+            const uint64_t qsBlocks = (static_cast<uint64_t>(qLen) + qsTile - 1) / qsTile;
+            const uint64_t taskNum = static_cast<uint64_t>(batch_size) * qnBlocks * qsBlocks;
+            if (taskNum != 0 && taskNum < launchBlockDim) {
+                launchBlockDim = static_cast<uint32_t>(taskNum);
+            }
+        } else if (flashDecodeFlag && (num_splits > 1)) {
+            // FD: fillCoreInfoForceSplit never yields more than num_splits
+            // segments per (batch, KV head), so this bound is exact whenever the
+            // KV stack count is >= num_splits and never under-launches otherwise.
+            // A full-chip SyncAll at the end makes every surplus block wait for
+            // the slowest split, so over-launching directly costs wall time.
+            const uint64_t segUpper = static_cast<uint64_t>(kvGroups) * static_cast<uint64_t>(num_splits);
+            if (segUpper != 0 && segUpper < launchBlockDim) {
+                launchBlockDim = static_cast<uint32_t>(segUpper);
+            }
+        }
+    }
     FwdLaunchArgs fwd_args;
     fwd_args.launchBlockDim = launchBlockDim;
     fwd_args.aclStream = aclStream;
@@ -801,6 +913,9 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.sequsedKVDevice = seqused_k_.has_value() ? static_cast<uint8_t*>(seqused_k_.value().data_ptr()) : nullptr;
     // MLA absorbed decode: the latent (nope) query half; nullptr keeps the non-MLA QK head dim.
     fwd_args.qvDevice = has_q_v ? static_cast<uint8_t*>(q_v_.value().data_ptr()) : nullptr;
+    // Dedicated absorbed-MLA decode kernel. The flag is computed from the shape
+    // above so the split, workspace and dispatch all agree.
+    fwd_args.mlaDecodeGemv = mlaDecodeGemv;
     fwd_args.qDevice = qDevice;
     fwd_args.kDevice = kDevice;
     fwd_args.vDevice = vDevice;
@@ -867,7 +982,15 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
     TORCH_CHECK(num_splits >= 0 && num_splits <= static_cast<int64_t>(blockDim),
                 "NPU FlashAttention supports num_splits in [0, ", blockDim,
                 "] (0 = auto; upper bound = number of AI cores). ");
-    TORCH_CHECK(num_splits <= 1 || (page_size.has_value() && is_varlen_q),
+    const bool denseMlaFd = !page_size.has_value() && !is_varlen_q && (num_heads_kv == 1) && (headdim_v == 512) &&
+                            (headdim + headdim_v == 576) && (max_seqlen_q * (num_heads_q / num_heads_kv) <= 128) &&
+                            (max_seqlen_q <= 16) && (max_seqlen_k >= 1024);
+    // Absorbed-MLA decode shape handled by the dedicated 128-token-tile kernel
+    // (which has its own KV split and accepts an explicit num_splits budget).
+    const bool mlaDecodeGemvShape = !page_size.has_value() && !is_varlen_q && (num_heads_kv == 1) &&
+                                    (headdim_v == 512) && (headdim + headdim_v == 576) && (max_seqlen_q == 1) &&
+                                    (num_heads_q >= 16) && !causal && (window_size_left < 0) && (window_size_right < 0);
+    TORCH_CHECK(num_splits <= 1 || (page_size.has_value() && is_varlen_q) || denseMlaFd || mlaDecodeGemvShape,
                 "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
     FwdMaskDerivation maskDer = DeriveFwdMask(causal, window_size_left, window_size_right, max_seqlen_q, max_seqlen_k);
     FAMetadataArgs args{};

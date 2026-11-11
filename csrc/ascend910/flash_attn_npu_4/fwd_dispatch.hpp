@@ -39,6 +39,7 @@ struct FwdLaunchArgs {
     bool is_local; // sliding-window attention (MASK_SWA)
     bool flashDecodeFlag;
     bool has_softcap;
+    bool mlaDecodeGemv; // MLA absorbed decode: route to the dedicated gemv kernel
     uint8_t* qDevice;
     uint8_t* kDevice;
     uint8_t* vDevice;

@@ -86,7 +86,13 @@ public:
         uint32_t maxQSeqlen = 0,
         bool outputLse = false,
         AscendC::GlobalTensor<ElementLse> oLseGmTensor = AscendC::GlobalTensor<ElementLse>(),
-        uint32_t totalQTokens = 0
+        uint32_t totalQTokens = 0,
+        // The dedicated gemv decode kernel writes both the partial O/LSE and the
+        // final output in batch-major dense layout ([B][qHeads][headSizeV]) and
+        // runs one reduction group per batch, so the group's indices are
+        // batch-local. When this is set, fold the owning batch's base offset into
+        // both the O and the LSE destination (the TND path never sets it).
+        bool perBatchBase = false
     ) {
         AscendC::SetAtomicNone();
         AscendC::SetMaskNorm();
@@ -128,6 +134,10 @@ public:
                 uint32_t q_half = q_len / 2;
                 gmOScalar = vectorsubBlockID == 0 ? baseGmOffset 
                                                 : baseGmOffset + q_half * qHeads * headSizeV;
+            }
+            if (perBatchBase) {
+                // [B][Sq][H][Dv] final output: fold in this group's owning batch.
+                gmOScalar += batchIdx * maxQSeqlen * qHeads * headSizeV;
             }
 
             uint32_t splitNum = splitInfo[process/2].splitNum;
@@ -203,7 +213,9 @@ public:
                     batchBase = 0;
                 } else {
                     qPos = qStartIndx;                    // within-batch token
-                    batchBase = prevQSeqlenSum * qHeads;  // batch * num_heads * seqlen_q
+                    batchBase = perBatchBase
+                                    ? (batchIdx * maxQSeqlen * qHeads)  // [B][Sq][H]
+                                    : (prevQSeqlenSum * qHeads);
                 }
                 if (q_len == 1) {
                     if (vectorsubBlockID != 0) {

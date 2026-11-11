@@ -17,6 +17,7 @@ as the non-contiguous ``transpose(1, 2)`` view; the output then keeps the caller
 
 import torch
 import torch_npu
+import pytest
 
 from flash_attn_npu_4 import (
     flash_attn_func,
@@ -219,6 +220,42 @@ def test_mla_decode_paged_varlen():
     v_flat = v_cache.cpu().reshape(num_pages * page_size, 1, dlatent)[:kv_len, 0]
     ref = _ref_decode(q.cpu()[0], qv.cpu()[0], k_flat, v_flat, scale)
     assert _rel_l2(out.cpu()[0], ref) < REL_L2_TOL
+
+
+# --------------------------------------------------------------------------
+# TND (packed varlen) decode: one query token per sequence, so the packed q/qv
+# and output batch bases are the cu_seqlens_q prefixes and the K/V base and
+# length come from cu_seqlens_k. The same 128-token KV split and CombineScale
+# reduction run as in the BSND case.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("kv_len", [129, 513, 1025])
+def test_mla_decode_tnd_varlen(batch, kv_len):
+    """Absorbed TND decode over a varlen batch, one latent cache per sequence."""
+    heads, drope, dlatent = 32, 64, 512
+    q, qv = _rand((batch, heads, drope)), _rand((batch, heads, dlatent))
+    k_cache = _rand((batch * kv_len, 1, drope))
+    v_cache = _rand((batch * kv_len, 1, dlatent))
+    cu_q = torch.arange(batch + 1, dtype=torch.int32, device=DEVICE)
+    cu_k = torch.arange(batch + 1, dtype=torch.int32, device=DEVICE) * kv_len
+    scale = (drope + dlatent) ** -0.5
+
+    out = flash_attn_varlen_func(
+        q, k_cache, v_cache, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        max_seqlen_q=1, max_seqlen_k=kv_len, qv=qv, softmax_scale=scale,
+    )
+
+    assert out.shape == (batch, heads, dlatent)
+    for b in range(batch):
+        ref = _ref_decode(
+            q.cpu()[b], qv.cpu()[b],
+            k_cache.cpu()[b * kv_len:(b + 1) * kv_len, 0],
+            v_cache.cpu()[b * kv_len:(b + 1) * kv_len, 0],
+            scale,
+        )
+        assert _rel_l2(out.cpu()[b], ref) < REL_L2_TOL
 
 
 # --------------------------------------------------------------------------

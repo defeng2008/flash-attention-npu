@@ -114,7 +114,14 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
         const uint32_t numTasks = metaArgs->batch * metaArgs->numHeadsK;
         const bool isLongSeq = (static_cast<double>(numTasks) <= 0.8 * bd) && (maxKvSeqlen >= bd * 512u);
         const bool isShortSeq = (static_cast<double>(numTasks) <= 0.4 * bd) && (maxKvSeqlen >= 1024u);
-        const bool fdFlag = (metaArgs->pagedKV != 0) && (metaArgs->isVarlen != 0) &&
+        // FlashDecode geometry: the split unit is one 512-row KV stack block, so
+        // it works for paged+varlen inputs and for dense MLA decode alike. Dense
+        // absorbed decode is recognised by the latent/value geometry (both 512)
+        // with a single KV head and no appended KV.
+        const bool denseMlaFd = (metaArgs->pagedKV == 0) && (metaArgs->isVarlen == 0) &&
+            (metaArgs->embeddingSizeV == 512u) && (metaArgs->embeddingSize + metaArgs->embeddingSizeV == 576u) &&
+            (metaArgs->numHeadsK == 1u) && (metaArgs->kvNewSeqlen == 0) && (metaArgs->numSplits > 1u);
+        const bool fdFlag = (((metaArgs->pagedKV != 0) && (metaArgs->isVarlen != 0)) || denseMlaFd) &&
             (metaArgs->maskType != MASK_TYPE_BAND) &&
             (maxQ * groupSize <= 128u) && (maxQ <= 16u) &&
             (maxKvSeqlen >= 1024u) && (minQ > 0u) && (isLongSeq || isShortSeq);

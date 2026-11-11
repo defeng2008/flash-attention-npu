@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "mha_fwd_kvcache.cpp"
+#include "mla_decode_gemv.hpp"
 
 // 7-param FAInfer (no IS_FD template arg — main moved flash-decode to tiling).
 #define FWD_LAUNCH(DTYPE, PAGED, MASK_TYPE, LAYOUT_TYPE, SOFTCAP)                                                      \
@@ -84,6 +85,15 @@ void launch_fwd_dtype(const FwdLaunchArgs& a)
     uint8_t* sinkDevice = a.sinkDevice;
     uint8_t* qvDevice = a.qvDevice;
     (void)flashDecodeFlag;
+
+    // MLA absorbed decode takes the dedicated gemv kernel: it is selected purely
+    // by shape on the host, so no other dispatch axis applies.
+    if (a.mlaDecodeGemv) {
+        SplitFuse::MlaDecodeGemv<DType, LAYOUT><<<launchBlockDim, nullptr, aclStream>>>(
+            fftsAddr, qDevice, kDevice, vDevice, oDevice, softmaxLseDevice, qSeqDevice, kvSeqDevice,
+            sequsedKVDevice, workspaceDevice, tilingDevice, runtimeDevice, qvDevice, kvSeqlenAllocated);
+        return;
+    }
 
     FWD_BOOL_SWITCH(paged_KV, IsPaged, {
         FWD_MASK_SWITCH(is_local, is_causal, MaskType, {

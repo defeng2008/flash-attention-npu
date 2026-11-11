@@ -312,6 +312,89 @@ def test_mla_decode_bnsd_cross_batch():
 
 
 # --------------------------------------------------------------------------
+# KV multi-core split: the dedicated absorbed-decode kernel walks the cache in
+# 128-token segments and hands each core a contiguous run of them, so kv_len >
+# 128 crosses cores and the per-split partial O/LSE are reduced by CombineScale.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("kv_len", [129, 513, 1025])
+def test_mla_decode_bsnd_kv_multicore(batch, kv_len):
+    """Absorbed decode with kv_len > one 128-token segment and batch > 1."""
+    heads, drope, dlatent = 32, 64, 512
+    q, qv = _rand((batch, 1, heads, drope)), _rand((batch, 1, heads, dlatent))
+    k_cache = _rand((batch, kv_len, 1, drope))
+    v_cache = _rand((batch, kv_len, 1, dlatent))
+    scale = (drope + dlatent) ** -0.5
+
+    out = flash_attn_with_kvcache(
+        q, k_cache, v_cache, qv=qv, cache_seqlens=kv_len, softmax_scale=scale
+    )
+
+    assert out.shape == (batch, 1, heads, dlatent)
+    for b in range(batch):
+        ref = _ref_decode(
+            q.cpu()[b, 0], qv.cpu()[b, 0], k_cache.cpu()[b, :, 0], v_cache.cpu()[b, :, 0], scale
+        )
+        assert _rel_l2(out.cpu()[b, 0], ref) < REL_L2_TOL
+
+
+def test_mla_decode_bsnd_kv_single_core():
+    """One 128-token segment stays on the direct single-core path (no reduction)."""
+    heads, kv_len, drope, dlatent = 32, 128, 64, 512
+    q, qv = _rand((1, 1, heads, drope)), _rand((1, 1, heads, dlatent))
+    k_cache = _rand((1, kv_len, 1, drope))
+    v_cache = _rand((1, kv_len, 1, dlatent))
+    scale = (drope + dlatent) ** -0.5
+
+    out = flash_attn_with_kvcache(
+        q, k_cache, v_cache, qv=qv, cache_seqlens=kv_len, softmax_scale=scale
+    )
+
+    assert out.shape == (1, 1, heads, dlatent)
+    ref = _ref_decode(q.cpu()[0, 0], qv.cpu()[0, 0], k_cache.cpu()[0, :, 0], v_cache.cpu()[0, :, 0], scale)
+    assert _rel_l2(out.cpu()[0, 0], ref) < REL_L2_TOL
+
+
+# --------------------------------------------------------------------------
+# TND (packed varlen) decode: one query token per sequence, so the packed q/qv
+# and output batch bases are the cu_seqlens_q prefixes and the K/V base and
+# length come from cu_seqlens_k. The same 128-token KV split and CombineScale
+# reduction run as in the BSND case.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("kv_len", [129, 513, 1025])
+def test_mla_decode_tnd_varlen(batch, kv_len):
+    """Absorbed TND decode over a varlen batch, one latent cache per sequence."""
+    heads, drope, dlatent = 32, 64, 512
+    q, qv = _rand((batch, heads, drope)), _rand((batch, heads, dlatent))
+    k_cache = _rand((batch * kv_len, 1, drope))
+    v_cache = _rand((batch * kv_len, 1, dlatent))
+    cu_q_cpu = torch.arange(batch + 1, dtype=torch.int32)
+    cu_k_cpu = torch.arange(batch + 1, dtype=torch.int32) * kv_len
+    cu_q, cu_k = cu_q_cpu.to(DEVICE), cu_k_cpu.to(DEVICE)
+    scale = (drope + dlatent) ** -0.5
+
+    out = flash_attn_varlen_func(
+        q, k_cache, v_cache, cu_q, cu_k, max_seqlen_q=1, max_seqlen_k=kv_len,
+        qv=qv, softmax_scale=scale,
+    )
+
+    assert out.shape == (batch, heads, dlatent)
+    for b in range(batch):
+        ref = _ref_decode(
+            q.cpu()[b], qv.cpu()[b],
+            k_cache.cpu()[b * kv_len:(b + 1) * kv_len, 0],
+            v_cache.cpu()[b * kv_len:(b + 1) * kv_len, 0],
+            scale,
+        )
+        assert _rel_l2(out.cpu()[b], ref) < REL_L2_TOL
+
+
+# --------------------------------------------------------------------------
 # rejection paths
 # --------------------------------------------------------------------------
 

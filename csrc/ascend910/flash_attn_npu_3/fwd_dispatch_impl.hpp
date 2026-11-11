@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "mha_fwd_kvcache.cpp"
+#include "mla_decode_gemv.hpp"
 
 // 9-parameter FAInfer: Q/KV/accumulator types, paged/FD, mask/layout, LSE mode, softcap.
 #define FWD_LAUNCH(DTYPE, PAGED, FLASH_DECODE, MASK_TYPE, LAYOUT_TYPE, SOFTCAP)                                        \
@@ -92,6 +93,16 @@ void launch_fwd_dtype(const FwdLaunchArgs& a)
     uint8_t* sequsedKVDevice = a.sequsedKVDevice;
     const int64_t kvSeqlenAllocated = a.kv_seqlen_allocated;
     uint8_t* qvDevice = a.qvDevice;
+    // Absorbed-MLA decode: dedicated 128-token-tile kernel, instantiated for all
+    // three dense layouts. Packed TND reads each sequence's q/qv/output base from
+    // params.actualQseqlen (cu_seqlens_q) and its K/V base/length from
+    // params.actualKvseqlen (cu_seqlens_k).
+    if (a.mlaDecodeGemv) {
+        SplitFuse::MlaDecodeGemv<DType, LAYOUT><<<launchBlockDim, nullptr, aclStream>>>(
+            fftsAddr, qDevice, kDevice, vDevice, oDevice, softmaxLseDevice, qSeqDevice, kvSeqDevice, sequsedKVDevice,
+            workspaceDevice, tiling, qvDevice, kvSeqlenAllocated);
+        return;
+    }
     FWD_BOOL_SWITCH(paged_KV, IsPaged, {
         FWD_BOOL_SWITCH(flashDecodeFlag, IsFlashDecode, {
             FWD_MASK_SWITCH(is_local, is_causal, MaskType, {

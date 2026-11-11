@@ -58,6 +58,10 @@ struct FwdLaunchArgs {
     uint8_t* sequsedQDevice;  // per-batch used Q lengths; nullptr when absent
     uint8_t* sequsedKVDevice; // per-batch used KV lengths; nullptr when absent
     uint8_t* qvDevice;        // MLA absorbed latent query; nullptr selects non-MLA
+    // Absorbed-MLA decode takes the dedicated 128-token-tile kernel instead of
+    // the generic FAInfer path. Selected by shape on the host; never set for
+    // non-MLA calls.
+    bool mlaDecodeGemv = false;
 };
 
 // Per-(dtype, layout) implementation, defined in autogen/fwd_dispatch_<dtype>_<layout>.cpp
