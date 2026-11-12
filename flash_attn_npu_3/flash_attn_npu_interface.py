@@ -46,8 +46,23 @@ _LAYOUT_BNSD = 2
 
 
 def _transposed_bnsd_view(t):
-    """``t.transpose(1, 2)`` if ``t`` is a contiguous BNSD tensor seen as BSND, else ``None``."""
-    if t is None or t.dim() != 4 or t.is_contiguous():
+    """``t.transpose(1, 2)`` if ``t`` is packed BNSD storage seen as a BSND view, else ``None``.
+
+    The layout is decided purely by explicit strides, never by ``is_contiguous()``: when
+    the sequence axis is size 1 (the absorbed MLA decode case ``Sq == 1``), PyTorch's
+    contiguity test ignores that size-1 axis, so a packed BNSD ``(B, H, 1, D)`` buffer
+    handed out as the ``transpose(1, 2)`` view ``(B, 1, H, D)`` reports
+    ``is_contiguous() == True`` and the stride evidence would be discarded. Read as BSND,
+    a packed BNSD buffer has ``stride(1) == D`` and ``stride(2) == S * D`` (its innermost
+    two axes are the packed head and dim axes), which is what is tested below.
+
+    A genuinely contiguous BSND ``(B, S, H, D)`` tensor has strides
+    ``(S*H*D, H*D, D, 1)``, so ``stride(1) == size(3)`` needs ``H*D == D`` (``H == 1``)
+    and ``stride(2) == size(1) * size(3)`` needs ``D == S*D`` (``S == 1``). Both can only
+    hold together for the degenerate ``(B, 1, 1, D)`` shape, where BNSD and BSND are the
+    same storage, so a false positive has no effect.
+    """
+    if t is None or t.dim() != 4:
         return None
     _, n1, _, n3 = t.shape
     if t.stride(3) == 1 and t.stride(1) == n3 and t.stride(2) == n1 * n3:

@@ -50,6 +50,11 @@ struct FAInferStaticTilingData {
     uint64_t padding1;
     uint64_t padding2;
     uint32_t padding3;
+    // P0 (G2): per-batch KV-split budget sunk by the host for the absorbed-MLA
+    // decode gemv kernel, which re-derives its (batch, split) task table on
+    // device. Occupies the 4-byte tail gap before splitLseTotalSize, so the
+    // 2336-byte static-metadata ABI is unchanged.
+    uint32_t nsplitPerBatch;
     uint64_t splitLseTotalSize;
     uint64_t splitOTotalSize;
     uint32_t totalSplitNodeNum;
@@ -126,6 +131,10 @@ struct FAInferStaticTilingData {
     uint32_t get_padding3() const
     {
         return padding3;
+    }
+    uint32_t get_nsplitPerBatch() const
+    {
+        return nsplitPerBatch;
     }
     uint64_t get_splitLseTotalSize() const
     {
@@ -219,6 +228,10 @@ struct FAInferStaticTilingData {
     void set_padding3(uint32_t value)
     {
         padding3 = value;
+    }
+    void set_nsplitPerBatch(uint32_t value)
+    {
+        nsplitPerBatch = value;
     }
     void set_splitLseTotalSize(uint64_t value)
     {

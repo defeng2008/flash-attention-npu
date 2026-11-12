@@ -347,3 +347,44 @@ def test_mla_decode_bnsd_cross_batch():
             q.cpu()[b], qv.cpu()[b], k_cache.cpu()[b, :, 0], v_cache.cpu()[b, :, 0], scale
         )
         assert _rel_l2(out.cpu()[b], ref) < REL_L2_TOL
+
+
+def test_mla_decode_bnsd_sq1_cross_batch():
+    """Sq == 1 packed BNSD decode: the layout must be picked from strides, not contiguity.
+
+    With a single query token the packed BNSD ``transpose(1, 2)`` view has a size-1
+    sequence axis on top of a contiguous ``(B, H, 1, D)`` buffer, so ``is_contiguous()``
+    reports ``True`` and cannot carry the layout signal: its strides are
+    ``(H*D, D, D, 1)``, versus ``(H*D, H*D, D, 1)`` for a contiguous BSND ``(B, 1, H, D)``.
+    The interface must still select BNSD (``_detect_layout`` -> ``_LAYOUT_BNSD``), drive
+    ``MlaDecodeGemv`` through ``launch_fwd<BNSD>``, and return the caller's
+    ``(B, 1, H, dv)`` view shape.
+
+    ``_to_bnsd_view`` cannot build this input at ``Sq == 1``: its ``.contiguous()`` is a
+    no-op on the transposed view, so it yields BSND storage rather than a packed BNSD
+    buffer. Build the transpose view directly from BNSD-shaped storage instead.
+    """
+    batch, heads, kv_len, drope, dlatent = 2, 16, 128, 64, 512
+    scale = (drope + dlatent) ** -0.5
+
+    q_bnsd = _rand((batch, heads, 1, drope)).transpose(1, 2)
+    qv_bnsd = _rand((batch, heads, 1, dlatent)).transpose(1, 2)
+    k_cache = _rand((batch, kv_len, 1, drope))
+    v_cache = _rand((batch, kv_len, 1, dlatent))
+    k_bnsd, v_bnsd = _to_bnsd_view(k_cache), _to_bnsd_view(v_cache)
+
+    # Guard against a "passes but silently ran BSND" case: the same q/qv/k/v must be
+    # recognized as packed BNSD by the shared layout detector.
+    from flash_attn_npu_4.flash_attn_npu_interface import _detect_layout, _LAYOUT_BNSD
+
+    assert _detect_layout(q_bnsd, k_bnsd, v_bnsd, None, None, qv_bnsd)[0] == _LAYOUT_BNSD
+
+    out = flash_attn_func(q_bnsd, k_bnsd, v_bnsd, qv=qv_bnsd, softmax_scale=scale)
+
+    assert out.shape == (batch, 1, heads, dlatent)
+    for b in range(batch):
+        ref = _ref_decode(
+            q_bnsd.cpu()[b, 0], qv_bnsd.cpu()[b, 0],
+            k_cache.cpu()[b, :, 0], v_cache.cpu()[b, :, 0], scale,
+        )
+        assert _rel_l2(out.cpu()[b, 0], ref) < REL_L2_TOL
