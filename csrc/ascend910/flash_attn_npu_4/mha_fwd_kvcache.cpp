@@ -446,11 +446,16 @@ class FAInferKernel {
                         bool isSplitKV = (enS2IdxNow - stS2IdxNow) > 0 &&
                                          (enS2IdxNow - stS2IdxNow) < static_cast<int32_t>(curKSBlockNumTmp);
 
+                        uint32_t pipelineDrain = 0;
+                        if (BIdx == endBIdx && n1Idx == enN1IdxNow && s1Idx == enS1IdxNow) {
+                            pipelineDrain = PRE_LAUNCH;
+                        }
+
                         const uint32_t currentTaskStateSlot = taskStateSequence % STACK_SLOTS;
                         const bool hasTaskWork = runMainLoop(
                             coreIdx, BIdx, qSeqlenCur, kvSeqlenCur, (uint32_t)n1Idx, (uint32_t)s1Idx, isSplitKV,
                             stS2IdxNow, enS2IdxNow, gmOffsetLseFD, gmOffsetOFD, globalTensors, descriptors,
-                            currentTaskStateSlot, issuedStackCount, PRE_LAUNCH, softmaxPingPongFlag);
+                            currentTaskStateSlot, issuedStackCount, pipelineDrain, softmaxPingPongFlag);
                         taskStateSequence += static_cast<uint32_t>(hasTaskWork);
 
                         if (isSplitKV) {
@@ -516,10 +521,15 @@ class FAInferKernel {
                 uint32_t qSBlockIdxCur = taskIdxCurBatch / curQNBlockNumCur;
                 uint32_t qNBlockIdxCur = taskIdxCurBatch - qSBlockIdxCur * curQNBlockNumCur;
 
+                uint32_t pipelineDrain = 0;
+                if (taskIdx + uint32_t(coreNum) >= totalTaskNum) {
+                    pipelineDrain = PRE_LAUNCH;
+                }
+
                 const uint32_t currentTaskStateSlot = taskStateSequence % STACK_SLOTS;
                 const bool hasTaskWork = runMainLoop(
                     coreIdx, curBatchTmp, qSeqlenCur, kvSeqlenCur, qNBlockIdxCur, qSBlockIdxCur, false, 0, 0, 0, 0,
-                    globalTensors, descriptors, currentTaskStateSlot, issuedStackCount, PRE_LAUNCH,
+                    globalTensors, descriptors, currentTaskStateSlot, issuedStackCount, pipelineDrain,
                     softmaxPingPongFlag);
                 taskStateSequence += static_cast<uint32_t>(hasTaskWork);
             }
@@ -836,10 +846,13 @@ class FAInferKernel {
         uint32_t stackSeqTilePad = MAX_KV_STACK_LEN;
         uint32_t taskStackCount = 0;
 
-        // Each Q tile fully drains its own KV stacks. Cross-task delayed PV
-        // left 2-stack dense tiles with no PV of their own and systematically
-        // wrong O (max|err|~8 on long KV). Within-task PRE_LAUNCH overlap is kept.
-        issuedStackCount = 0;
+        // The delayed-PV ring is per core and persists across Q tiles: stack s's PV
+        // is issued PRE_LAUNCH stacks after its QK, so within one loop iteration the
+        // early QK of the current tile precedes the late PV of an earlier tile and
+        // absorbs the softmax latency. Every StackDescriptor carries its complete
+        // task state, so a lagging PV is self-contained and no longer needs the
+        // tile to drain its own stacks. The core's last task passes
+        // pipelineDrain == PRE_LAUNCH to flush the trailing stacks.
 
         const bool taskOwnsSink = hasSink && (stS2IdxNow == 0);
         const bool isEmptyTask = kvStart >= kvEnd;
@@ -863,7 +876,12 @@ class FAInferKernel {
                     gLseFD[gmOffsetLseFD], qSBlockSize, qNBlockSize, qNStartIdx, gSink);
             }
 #endif
-            return false;
+            if (pipelineDrain == 0) {
+                return false;
+            }
+            // The core's last task may be empty and still flushes the preceding
+            // tasks' delayed PV.
+            kvStart = kvEnd;
         }
 
 #ifdef __DAV_C220_CUBE__
