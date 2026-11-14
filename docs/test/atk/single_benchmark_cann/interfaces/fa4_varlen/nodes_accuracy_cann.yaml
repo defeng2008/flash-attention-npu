@@ -1,0 +1,12 @@
+# 候选 npu 与 FIA 标杆 npu 同设备；标杆节点带 is_bm，由 execute 按节点名判别。
+# 注意：不能给候选节点加 is_compare: false，否则 ATK 会把它排除在精度比对之外。
+nodes:
+  - backend: npu
+    name: candidate
+    devices: [0]
+    task: [accuracy]
+  - backend: npu
+    name: fia_mla
+    devices: [0]
+    task: [accuracy]
+    is_bm: true

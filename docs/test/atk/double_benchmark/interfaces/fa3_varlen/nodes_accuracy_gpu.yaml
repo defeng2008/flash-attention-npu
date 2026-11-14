@@ -1,0 +1,11 @@
+nodes:
+  - backend: npu
+    devices: [0]
+    task: [accuracy]
+  - backend: cpu
+    task: [accuracy]
+  - backend: gpu
+    host: 192.168.0.100  # TODO: 改为 GPU 主机 IP
+    port: 9090
+    devices: [0]
+    task: [accuracy]

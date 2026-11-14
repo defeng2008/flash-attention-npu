@@ -1,0 +1,6 @@
+nodes:
+  - backend: npu
+    devices: [0]
+    task: [accuracy]
+  - backend: cpu
+    task: [accuracy]

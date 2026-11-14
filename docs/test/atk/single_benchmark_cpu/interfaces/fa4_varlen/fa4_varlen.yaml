@@ -1,0 +1,163 @@
+# fa4_varlen.yaml —— flash_attn_npu_4.flash_attn_varlen_func 的 ATK 用例设计文件
+# 类别：single_benchmark_cpu（npu 候选 vs CPU fp32 标杆精度对比）
+#
+# 这份 yaml 是本接口的**唯一真值**，用例不再手写，而是由 run 脚本现场生成：
+#   atk case -f fa4_varlen.yaml -p . -s <seed>
+#     -> result/fa4_varlen/json/all_fa4_varlen.json
+#     -> 拷成 cases/all_fa4_varlen.json（交付里可直接打开查看）
+#
+# 两个必须知道的约定：
+#  1) ATK 会按下面的取值范围**逐维独立**随机每个输入，所以 k/v/qv/cache/索引张量
+#     之间不可能自洽；跨输入的耦合全部由 generate_fa4_varlen.py 里的钩子按 MLA 的
+#     数学契约统一改写（头数、末维、cache 与索引张量的内容/长度等）。
+#     因此这里只写「每一维的候选取值」，不描述输入之间的对应关系。
+#  2) 形态由 q 的最后一维决定：
+#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）
+#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）
+#
+# 生成后每条用例的形状（钩子改写之后；TND 按单序列打包）：
+#   TND prefill  : q[Tq,32,192]  k[Tk,32,192]  v[Tk,32,128]  cu_seqlens_x=[0,Tx]
+#   TND decode   : q[Tq,32,64]   qv[Tq,32,512] k[Tk,1,64]    v[Tk,1,512]
+#   paged        : KV 变 [num_blocks,128,H,D]，另加 page_table（页表写成连续块）
+name: flash_attn_npu_4.flash_attn_varlen_func
+api: pytorch
+api_type: fa4_varlen_mla_accuracy
+version: v2.1
+generate: fa4_varlen_mla_constraints
+
+# 用例条数：本文件所有输入都只有 1 个 dtype，所以总条数 = dtype_numbers = 100
+dtype_numbers: 100
+# 关掉边界/空 tensor 用例：q.shape 为空时钩子无法判断 prefill/decode
+extra_numbers: 0
+outputs: 1
+
+# 判据：cv_fused_double_benchmark（混合容差 atol/rtol）。bf16 的 eps 是 2^-8，
+# 阈值 2.0 约等于「最大相对误差 <= 0.78%」；mem 只在 gpu_mem_compare 用得到。
+standard:
+  acc:
+    cv_fused_double_benchmark:
+      max_re_ratio: 2.0
+      avg_re_ratio: 1.2
+      root_mean_squared_ratio: 1.2
+  perf: not_key
+  mem: 1.1
+shape_distributions: [[0, 1.0]]
+
+# 输入声明。tensor 用 dim_values 给每一维的候选取值；attr 用 ranges.valid.values 给离散值。
+inputs:
+  # [total_q, Hq, Dq]，TND 打包布局（本文件按单序列打包）
+  - name: q
+    type: tensor
+    required: false
+    dtypes: {values: [bf16]}
+    shapes:
+      dim_numbers: {values: [3]}
+      dim_values:
+        - values: [1, 64, 198, 512]
+        - values: [32]
+        - values: [64, 192]
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  # k: [total_k, Hk, Dk]
+  - name: k
+    type: tensor
+    required: false
+    dtypes: {values: [bf16]}
+    shapes:
+      dim_numbers: {values: [3]}
+      dim_values:
+        - values: [1, 64, 198, 256, 384, 512, 1025]
+        - values: [1, 32]
+        - values: [64, 192]
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  # v: [total_k, Hk, Dv]
+  - name: v
+    type: tensor
+    required: false
+    dtypes: {values: [bf16]}
+    shapes:
+      dim_numbers: {values: [3]}
+      dim_values:
+        - values: [1, 64, 198, 256, 384, 512, 1025]
+        - values: [1, 32]
+        - values: [128, 512]
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  # qv: 吸收态专用 [total_q, Hq, 512]；prefill 用例会被钩子摘掉
+  - name: qv
+    type: tensor
+    required: false
+    dtypes: {values: [bf16]}
+    shapes:
+      dim_numbers: {values: [3]}
+      dim_values:
+        - values: [1, 64, 198, 512]
+        - values: [32]
+        - values: [512]
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  # 每个 sequence 的 q 累计长度（钩子写死成 [0, total_q]）
+  - name: cu_seqlens_q
+    type: tensor
+    required: false
+    dtypes: {values: [int32]}
+    shapes:
+      dim_numbers: {values: [1]}
+      max_length: 4096
+  # 每个 sequence 的 kv 累计长度（钩子写死成 [0, total_k]）
+  - name: cu_seqlens_k
+    type: tensor
+    required: false
+    dtypes: {values: [int32]}
+    shapes:
+      dim_numbers: {values: [1]}
+      max_length: 4096
+  # 最长的 q 序列（钩子改成 total_q）
+  - name: max_seqlen_q
+    type: attr
+    required: false
+    dtypes: {values: [int]}
+    ranges:
+      valid:
+        values: [1, 64, 198, 512]
+  # 最长的 kv 序列（钩子改成 total_k / num_blocks*BLOCK）
+  - name: max_seqlen_k
+    type: attr
+    required: false
+    dtypes: {values: [int]}
+    ranges:
+      valid:
+        values: [64, 198, 256, 384, 512, 1025]
+  # MLA 固定 192^-0.5
+  - name: softmax_scale
+    type: attr
+    required: false
+    dtypes: {values: [float]}
+    ranges:
+      valid:
+        values: [0.07216878364870322]
+  # causal / 非 causal 各一半
+  - name: causal
+    type: attr
+    required: false
+    dtypes: {values: [bool]}
+    ranges:
+      valid:
+        values: [false, true]
+  # window_size: (left, right) 二元组，-1 表示该侧不限制；两个元素独立取值
+# 只有候选和标杆都支持该入参的类别才声明（FIA 标杆没有）
+  - name: window_size
+    type: attr_tuple
+    required: false
+    tuple_numbers:
+      values: [2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [-1, 64, 128]
