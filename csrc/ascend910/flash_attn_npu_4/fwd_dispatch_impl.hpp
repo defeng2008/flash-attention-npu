@@ -88,8 +88,8 @@ void launch_fwd_dtype(const FwdLaunchArgs& a)
 
     if (a.mlaDecodeGemv) {
         SplitFuse::MlaDecodeGemv<DType, LAYOUT><<<launchBlockDim, nullptr, aclStream>>>(
-            fftsAddr, qDevice, kDevice, vDevice, oDevice, softmaxLseDevice, qSeqDevice, kvSeqDevice,
-            sequsedKVDevice, workspaceDevice, tilingDevice, runtimeDevice, qvDevice, kvSeqlenAllocated);
+            fftsAddr, qDevice, kDevice, vDevice, oDevice, softmaxLseDevice, qSeqDevice, kvSeqDevice, sequsedKVDevice,
+            workspaceDevice, tilingDevice, runtimeDevice, qvDevice, kvSeqlenAllocated);
         return;
     }
 

@@ -742,8 +742,7 @@ class FAInferKernel {
         } else {
             qvBOffset = static_cast<uint64_t>(prevQSeqlenSum) * strideQv;
         }
-        uint64_t gmOffsetQv = qvBOffset +
-                              static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideQv +
+        uint64_t gmOffsetQv = qvBOffset + static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideQv +
                               static_cast<uint64_t>(qNStartIdx) * qvHeadStride;
         uint64_t gmOffsetK = kBOffset + static_cast<uint64_t>(kvNIdx) * kvHeadStrideK;
         uint64_t gmOffsetV = vBOffset + static_cast<uint64_t>(kvNIdx) * kvHeadStrideV;
@@ -916,8 +915,8 @@ class FAInferKernel {
                 blockMmadQK.loadQGM(gQv[gmOffsetQv], layoutQTemp, rowNum, qNBlockSize,
                                     static_cast<uint32_t>(qvHeadStride), static_cast<uint32_t>(strideQv));
             } else {
-                blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize,
-                                    static_cast<uint32_t>(qHeadStride), static_cast<uint32_t>(strideQ));
+                blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, static_cast<uint32_t>(qHeadStride),
+                                    static_cast<uint32_t>(strideQ));
             }
         }
 #endif
@@ -998,13 +997,13 @@ class FAInferKernel {
                 if constexpr (PAGED_CACHE_FLAG) {
                     blockMmadQK(gQ[gmOffsetQ], gQKSrcLatent, gS[gmOffsetS],
                                 isAppendBlock ? gBlockTable : gBlockTable[blockBOffset], layoutQTemp, layoutQKSrc,
-                                layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize,
-                                qkStrideKV, doCopyback, gK[gmOffsetK], qkCacheOffset, gBlockTable,
+                                layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize, qkStrideKV,
+                                doCopyback, gK[gmOffsetK], qkCacheOffset, gBlockTable,
                                 isAppendBlock ? pagedBlockSize : 0U, static_cast<uint32_t>(blockBOffset));
                 } else {
                     blockMmadQK(gQ[gmOffsetQ], gQKSrcLatent, gS[gmOffsetS], gBlockTable, layoutQTemp, layoutQKSrc,
-                                layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize,
-                                qkStrideKV, doCopyback, gK[gmOffsetK], qkCacheOffset);
+                                layOutS, actualBlockShapeQK, kvSIdxLocal, kvSLoopNumTotal, pagedBlockSize, qkStrideKV,
+                                doCopyback, gK[gmOffsetK], qkCacheOffset);
                 }
                 if (kvSIdx == kvEnd - 1) {
                     AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
@@ -1180,7 +1179,7 @@ class FAInferKernel {
     uint64_t strideV;
     uint64_t qHeadStride;
     uint64_t oHeadStride;
-    uint64_t strideQv;   // MLA absorbed: token stride of the latent query
+    uint64_t strideQv; // MLA absorbed: token stride of the latent query
     uint64_t qvHeadStride;
     // MLA absorbed: rope K cache page stride; latent K uses value stride.
     uint64_t keyPageStride;
@@ -1208,11 +1207,11 @@ template <typename InputDtypeQ = half, typename InputDtypeKv = half, typename In
           bool PagedCacheFlag = false, FaiKenel::MaskType maskCategory = FaiKenel::MaskType::NO_MASK,
           FaiKenel::inputLayout inLayout = FaiKenel::inputLayout::TND,
           Epilogue::LseModeT lseMode = Epilogue::LseModeT::NONE, bool HAS_SOFTCAP = false>
-__global__ __aicore__ void
-FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
-        GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, FAInferTilingParams tiling, GM_ADDR kNew,
-        GM_ADDR vNew, GM_ADDR seqUsedQ = nullptr, GM_ADDR seqUsedKv = nullptr, int64_t kvSeqlenAllocated = 0,
-        GM_ADDR qv = nullptr)
+__global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask,
+                                   GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse, GM_ADDR actualQseqlen,
+                                   GM_ADDR actualKvseqlen, GM_ADDR workspace, FAInferTilingParams tiling, GM_ADDR kNew,
+                                   GM_ADDR vNew, GM_ADDR seqUsedQ = nullptr, GM_ADDR seqUsedKv = nullptr,
+                                   int64_t kvSeqlenAllocated = 0, GM_ADDR qv = nullptr)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
 
@@ -1267,9 +1266,8 @@ FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADD
 
     using SplitInfoType = splitNode[25];
     using CombineScale = Epilogue::Block::CombineScale<OType, LseType, SplitInfoType>;
-    FAIKernelParams params{q,    k,         v,      mask, blockTables, actualQseqlen, actualKvseqlen, o,
-                           lse,  workspace, tiling, kNew, vNew,        seqUsedQ,      seqUsedKv,      kvSeqlenAllocated,
-                           qv};
+    FAIKernelParams params{q,         k,      v,    mask, blockTables, actualQseqlen, actualKvseqlen,    o, lse,
+                           workspace, tiling, kNew, vNew, seqUsedQ,    seqUsedKv,     kvSeqlenAllocated, qv};
     // Select the specialization from device metadata.
     if constexpr (PagedCacheFlag) {
         if (reinterpret_cast<__gm__ FAInferTilingData*>(tiling.tilingDataAddr)->flashDecodeFlag != 0U) {

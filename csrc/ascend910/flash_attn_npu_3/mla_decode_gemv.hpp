@@ -251,15 +251,13 @@ class MlaDecodePersistRescale {
         }
     }
 
-    __aicore__ inline void SubCoreCompute(AscendC::GlobalTensor<ElementOutput> gOutput,
-                                          AscendC::GlobalTensor<ElementInput> gInput,
-                                          AscendC::GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput,
-                                          const LayoutInput& layoutInput, const LayoutLse& layoutLse,
-                                          uint32_t qNThisSubBlock, uint32_t qSThisSubBlock, uint32_t totalRowNum,
-                                          uint32_t isFirstStackTile, uint32_t isLastStackTile,
-                                          uint32_t curStackTileMod, uint32_t taskStateSlot, uint32_t isLastRowLoop,
-                                          uint32_t rowOffsetLoop, uint32_t outputStride, uint32_t oHeadStride,
-                                          bool fdMode, AscendC::GlobalTensor<float> gPartialO)
+    __aicore__ inline void
+    SubCoreCompute(AscendC::GlobalTensor<ElementOutput> gOutput, AscendC::GlobalTensor<ElementInput> gInput,
+                   AscendC::GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput,
+                   const LayoutInput& layoutInput, const LayoutLse& layoutLse, uint32_t qNThisSubBlock,
+                   uint32_t qSThisSubBlock, uint32_t totalRowNum, uint32_t isFirstStackTile, uint32_t isLastStackTile,
+                   uint32_t curStackTileMod, uint32_t taskStateSlot, uint32_t isLastRowLoop, uint32_t rowOffsetLoop,
+                   uint32_t outputStride, uint32_t oHeadStride, bool fdMode, AscendC::GlobalTensor<float> gPartialO)
     {
         uint32_t curRowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -302,8 +300,8 @@ class MlaDecodePersistRescale {
             if (embed % FLOAT_VECTOR_SIZE > 0) {
                 SetMask(embed % FLOAT_VECTOR_SIZE);
                 AscendC::Mul<float, false>(goPersistUbTensor[embed / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE],
-                                           goPersistUbTensor[embed / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE],
-                                           tvUbTensor, (uint64_t)0, curRowNum,
+                                           goPersistUbTensor[embed / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE], tvUbTensor,
+                                           (uint64_t)0, curRowNum,
                                            AscendC::BinaryRepeatParams(1, 1, 0, embedRound / FLOAT_BLOCK_SIZE,
                                                                        embedRound / FLOAT_BLOCK_SIZE, 1));
                 AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
@@ -354,8 +352,8 @@ class MlaDecodePersistRescale {
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                CopyOToGmFp32(gPartialO, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock,
-                              embed, embedRound, outputStride, oHeadStride);
+                CopyOToGmFp32(gPartialO, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
+                              embedRound, outputStride, oHeadStride);
             } else {
                 // *** gl_block = expand_to_block(gl)
                 AscendC::Brcb(tvUbTensor.ReinterpretCast<uint32_t>(),
@@ -381,24 +379,24 @@ class MlaDecodePersistRescale {
                     AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
                 }
                 AscendC::PipeBarrier<PIPE_V>();
-            // *** go = castfp32to16(go)
-            if (std::is_same<ElementOutput, bfloat16_t>::value) {
-                AscendC::Cast<ElementOutput, float, false>(
-                    goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_RINT, (uint64_t)0,
-                    (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
-                    AscendC::UnaryRepeatParams(1, 1, 4, 8));
-            } else {
-                AscendC::Cast<ElementOutput, float, false>(
-                    goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_NONE, (uint64_t)0,
-                    (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
-                    AscendC::UnaryRepeatParams(1, 1, 4, 8));
-            }
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            // *** 写 O 到 GM
-            AscendC::PipeBarrier<PIPE_V>();
-            CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
-                      embedRound, outputStride, oHeadStride);
+                // *** go = castfp32to16(go)
+                if (std::is_same<ElementOutput, bfloat16_t>::value) {
+                    AscendC::Cast<ElementOutput, float, false>(
+                        goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_RINT, (uint64_t)0,
+                        (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
+                        AscendC::UnaryRepeatParams(1, 1, 4, 8));
+                } else {
+                    AscendC::Cast<ElementOutput, float, false>(
+                        goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_NONE, (uint64_t)0,
+                        (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
+                        AscendC::UnaryRepeatParams(1, 1, 4, 8));
+                }
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                // *** 写 O 到 GM
+                AscendC::PipeBarrier<PIPE_V>();
+                CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
+                          embedRound, outputStride, oHeadStride);
             }
             if constexpr (LSE_MODE == Catlass::Epilogue::LseModeT::OUT_ONLY) {
                 if (isLastRowLoop) {
@@ -424,16 +422,14 @@ class MlaDecodePersistRescale {
         }
     }
 
-    __aicore__ inline void operator()(AscendC::GlobalTensor<ElementOutput> gOutput,
-                                      AscendC::GlobalTensor<ElementInput> gInput,
-                                      AscendC::GlobalTensor<ElementUpdate> gUpdate,
-                                      AscendC::GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput,
-                                      const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
-                                      const LayoutLse& layoutLse, GemmCoord actualBlockShape, const TaskPlan& taskPlan,
-                                      Arch::CrossCoreFlag pvReady, uint32_t qSBlockSize, uint32_t qNBlockSize,
-                                      uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
-                                      uint32_t taskStateSlot, uint32_t outputStride, uint32_t oHeadStride,
-                                      bool fdMode, AscendC::GlobalTensor<float> gPartialO)
+    __aicore__ inline void
+    operator()(AscendC::GlobalTensor<ElementOutput> gOutput, AscendC::GlobalTensor<ElementInput> gInput,
+               AscendC::GlobalTensor<ElementUpdate> gUpdate, AscendC::GlobalTensor<ElementLse> gLse,
+               const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
+               const LayoutLse& layoutLse, GemmCoord actualBlockShape, const TaskPlan& taskPlan,
+               Arch::CrossCoreFlag pvReady, uint32_t qSBlockSize, uint32_t qNBlockSize, uint32_t isFirstStackTile,
+               uint32_t isLastStackTile, uint32_t curStackTileMod, uint32_t taskStateSlot, uint32_t outputStride,
+               uint32_t oHeadStride, bool fdMode, AscendC::GlobalTensor<float> gPartialO)
     {
         (void)gUpdate;
         (void)layoutUpdate;
@@ -446,8 +442,7 @@ class MlaDecodePersistRescale {
         const uint32_t inRowOffsetThisSubBlock = taskPlan.inRowOffsetThisSubBlock;
         uint32_t outHeadOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock;
         uint32_t qSThisSubBlock = taskPlan.qSThisSubBlock;
-        int64_t outOffsetSubBlock =
-            static_cast<int64_t>(outHeadOffsetThisSubBlock) * oHeadStride;
+        int64_t outOffsetSubBlock = static_cast<int64_t>(outHeadOffsetThisSubBlock) * oHeadStride;
 
         uint32_t outLseRowOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock;
         uint32_t outLseColOffsetThisSubBlock = (qNBlockSize == 1U) ? inRowOffsetThisSubBlock : 0;
@@ -464,27 +459,26 @@ class MlaDecodePersistRescale {
         uint32_t rowLoop = taskPlan.rowLoop;
         for (uint32_t rowLoopIdx = 0; rowLoopIdx < rowLoop; rowLoopIdx++) {
             uint32_t rowOffsetLoop = rowLoopIdx * taskPlan.rowNumTile;
-            uint32_t rowActualCurLoop =
-                (rowLoopIdx == (rowLoop - 1U)) ? inRowActualThisSubBlock - rowLoopIdx * taskPlan.rowNumTile
-                                               : taskPlan.rowNumTile;
+            uint32_t rowActualCurLoop = (rowLoopIdx == (rowLoop - 1U))
+                                            ? inRowActualThisSubBlock - rowLoopIdx * taskPlan.rowNumTile
+                                            : taskPlan.rowNumTile;
 
-            int64_t offsetOutput = static_cast<int64_t>(rowLoopIdx * taskPlan.rowNumTile / qSThisSubBlock) *
-                                       oHeadStride +
-                                   outOffsetSubBlock;
+            int64_t offsetOutput =
+                static_cast<int64_t>(rowLoopIdx * taskPlan.rowNumTile / qSThisSubBlock) * oHeadStride +
+                outOffsetSubBlock;
             auto gOutputCurLoop = gOutput[offsetOutput];
             auto gPartialOCurLoop = gPartialO[offsetOutput];
             auto layoutOutputCurLoop = layoutOutput;
-            int64_t offsetInput =
-                layoutInput.GetOffset(MatrixCoord(inRowOffsetThisSubBlock + rowOffsetLoop, 0));
+            int64_t offsetInput = layoutInput.GetOffset(MatrixCoord(inRowOffsetThisSubBlock + rowOffsetLoop, 0));
             auto gInputCurLoop = gInput[offsetInput];
             auto layoutInputCurLoop = layoutInput.GetTileLayout(MatrixCoord(rowActualCurLoop, embed));
 
             if (rowLoopIdx == 0) {
                 Arch::CrossCoreWaitFlag(pvReady);
             }
-            SubCoreCompute(gOutputCurLoop, gInputCurLoop, gLseThisSubBlock, layoutOutputCurLoop,
-                           layoutInputCurLoop, layoutOutLseThisSubBlock, qNThisSubBlock, qSThisSubBlock,
-                           inRowActualThisSubBlock, isFirstStackTile, isLastStackTile, curStackTileMod, taskStateSlot,
+            SubCoreCompute(gOutputCurLoop, gInputCurLoop, gLseThisSubBlock, layoutOutputCurLoop, layoutInputCurLoop,
+                           layoutOutLseThisSubBlock, qNThisSubBlock, qSThisSubBlock, inRowActualThisSubBlock,
+                           isFirstStackTile, isLastStackTile, curStackTileMod, taskStateSlot,
                            (rowLoopIdx == rowLoop - 1U), rowOffsetLoop, outputStride, oHeadStride, fdMode,
                            gPartialOCurLoop);
         }
@@ -529,9 +523,9 @@ class MlaDecodeGemvKernel {
 
     // KV-split reduction (only instantiated in the multi-core path).
     using SplitInfoType = splitNode[25];
-    using CombineScaleType = Catlass::Epilogue::Block::CombineScale<Gemm::GemmType<ElementO, LayoutO>,
-                                                                    Gemm::GemmType<ElementLse, LayoutLse>,
-                                                                    SplitInfoType>;
+    using CombineScaleType =
+        Catlass::Epilogue::Block::CombineScale<Gemm::GemmType<ElementO, LayoutO>, Gemm::GemmType<ElementLse, LayoutLse>,
+                                               SplitInfoType>;
 
     static constexpr uint32_t STACK_SLOTS = PRE_LAUNCH + 1;
 
@@ -539,15 +533,16 @@ class MlaDecodeGemvKernel {
 
     __aicore__ inline void operator()(FAIKernelParams const& params)
     {
-        __gm__ FAInferTilingData* tilingData = reinterpret_cast<__gm__ FAInferTilingData*>(params.tiling.tilingDataAddr);
+        __gm__ FAInferTilingData* tilingData =
+            reinterpret_cast<__gm__ FAInferTilingData*>(params.tiling.tilingDataAddr);
         mm1OutSize = tilingData->mm1OutSize;
         smOnlineOutSize = tilingData->smOnlineOutSize;
         mm2OutSize = tilingData->mm2OutSize;
         updateSize = tilingData->UpdateSize;
         batch = tilingData->batch;
         qHeads = tilingData->numHeads;
-        kvHeads = 1;                  // D2: 闸门 IsMlaDecodeGemvShape 保证 numHeadsK==1
-        embed = MLA_DECODE_ROPE_DIM;  // D2: 闸门保证 headSizeOg+headSizeV==576 && headSizeV==512
+        kvHeads = 1;                 // D2: 闸门 IsMlaDecodeGemvShape 保证 numHeadsK==1
+        embed = MLA_DECODE_ROPE_DIM; // D2: 闸门保证 headSizeOg+headSizeV==576 && headSizeV==512
         embedV = MLA_DECODE_LATENT_DIM;
         embedQK = MLA_DECODE_QK_DIM;
         maxQSeqlen = tilingData->maxQSeqlen;
@@ -611,8 +606,7 @@ class MlaDecodeGemvKernel {
         AscendC::GlobalTensor<ElementOTmp> gOTmp;
         gOTmp.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workSpace + mm1OutSize + smOnlineOutSize));
         AscendC::GlobalTensor<ElementOTmp> gOUpdate;
-        gOUpdate.SetGlobalBuffer(
-            (__gm__ ElementOTmp*)(params.workSpace + mm1OutSize + smOnlineOutSize + mm2OutSize));
+        gOUpdate.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workSpace + mm1OutSize + smOnlineOutSize + mm2OutSize));
 
         // FD partials live past this kernel's scratch tables (see the host's
         // partialBase): [LSE f32][O f32], group-major, written by each core.
@@ -620,8 +614,7 @@ class MlaDecodeGemvKernel {
         AscendC::GlobalTensor<ElementLse> gLseFD;
         gLseFD.SetGlobalBuffer((__gm__ ElementLse*)(params.workSpace + partialBase));
         AscendC::GlobalTensor<ElementLse> gOFD;
-        gOFD.SetGlobalBuffer(
-            (__gm__ ElementLse*)(params.workSpace + partialBase + tilingData->splitLseTotalSize));
+        gOFD.SetGlobalBuffer((__gm__ ElementLse*)(params.workSpace + partialBase + tilingData->splitLseTotalSize));
 
         uint32_t coreIdx = AscendC::GetBlockIdx();
 #ifdef __DAV_C220_CUBE__
@@ -708,8 +701,8 @@ class MlaDecodeGemvKernel {
         // BSND/BNSD LSE is (B,H,maxQSeqlen); TND LSE is (H,total_q).
         // FD partial is [split][head] (lseTaskOffset + s*qHeads), stride 1.
         const bool lseSplitActive = tilingData->splitLseTotalSize > 0U;
-        LayoutLse layoutLse(
-            qHeads, (INPUT_LAYOUT == FaiKenel::inputLayout::TND && !lseSplitActive) ? totalQTokens : maxQSeqlen);
+        LayoutLse layoutLse(qHeads, (INPUT_LAYOUT == FaiKenel::inputLayout::TND && !lseSplitActive) ? totalQTokens
+                                                                                                    : maxQSeqlen);
 #endif
         // fdMode is armed only when the host split KV across cores (it sets
         // splitLseTotalSize, else a whole-batch core must NOT use partial path.
@@ -843,10 +836,11 @@ class MlaDecodeGemvKernel {
 #ifdef __DAV_C220_CUBE__
                 blockMmadQK.resetBlockStart(0U, pagedBlockSize);
                 blockMmadQK.SetMlaLatentDim(embedV);
-                blockMmadQK.SetMlaRopeQ(gQ[gmOffsetQ], static_cast<uint32_t>(qHeadStride), static_cast<uint32_t>(strideQ));
+                blockMmadQK.SetMlaRopeQ(gQ[gmOffsetQ], static_cast<uint32_t>(qHeadStride),
+                                        static_cast<uint32_t>(strideQ));
                 blockMmadQK.SetMlaRopeK(gK[gmOffsetK], static_cast<uint32_t>(strideK), 0);
-                blockMmadQK.loadQGM(gQv[gmOffsetQv], layoutQ, rowNum, qNBlockSize,
-                                    static_cast<uint32_t>(qvHeadStride), static_cast<uint32_t>(strideQv));
+                blockMmadQK.loadQGM(gQv[gmOffsetQv], layoutQ, rowNum, qNBlockSize, static_cast<uint32_t>(qvHeadStride),
+                                    static_cast<uint32_t>(strideQv));
                 // P0 (G2)：Q L1 槽位回补挪到本 task 段循环之后（见下）。此处立刻 SetFlag 会让
                 // loadQGM（MTE2 写 Q）抢在末次 copyL1ToL0A（MTE1 读 Q）前，构成 WAR hazard。
 #endif
@@ -893,9 +887,11 @@ class MlaDecodeGemvKernel {
                     const bool lastStack = (seg + 1U >= numSeg);
                     // 前瞻段（seg+1）参数：MM1 + softmax。
                     const uint32_t kvSStartNext = (seg + 1U) * MLA_DECODE_KV_TILE;
-                    const uint32_t stackSeqTileNext = AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal - kvSStartNext);
+                    const uint32_t stackSeqTileNext =
+                        AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal - kvSStartNext);
                     const uint32_t slotNext = (seg + 1U) % STACK_SLOTS;
-                    const uint64_t gmOffsetBlockNext = wsSlotBase + static_cast<uint64_t>(slotNext) * WORKSPACE_BLOCK_SIZE_DB;
+                    const uint64_t gmOffsetBlockNext =
+                        wsSlotBase + static_cast<uint64_t>(slotNext) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapeQKNext{rowNum, stackSeqTileNext, embedQK};
                     LayoutS layOutSNext(rowNum, stackSeqTileNext, MLA_DECODE_KV_TILE);
                     // 当前段（seg）参数：MM2 + rescale。
@@ -907,15 +903,17 @@ class MlaDecodeGemvKernel {
 
 #ifdef __DAV_C220_CUBE__
                     if (hasNext) {
-                        blockMmadQK(gQ[gmOffsetQ], gV[gmOffsetV], gS[gmOffsetBlockNext], AscendC::GlobalTensor<int32_t>(),
-                                    layoutQ, layoutKLatent, layOutSNext, actualBlockShapeQKNext, seg + 1U, numSeg,
-                                    blockSize, static_cast<uint32_t>(strideV), false, gK[gmOffsetK], 0);
+                        blockMmadQK(gQ[gmOffsetQ], gV[gmOffsetV], gS[gmOffsetBlockNext],
+                                    AscendC::GlobalTensor<int32_t>(), layoutQ, layoutKLatent, layOutSNext,
+                                    actualBlockShapeQKNext, seg + 1U, numSeg, blockSize, static_cast<uint32_t>(strideV),
+                                    false, gK[gmOffsetK], 0);
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
                     }
                     LayoutP layoutPTemp(rowNum, stackSeqTile, MLA_DECODE_KV_TILE);
-                    blockMmadPV(gP[gmOffsetBlock], gV[gmOffsetV], gOTmp[gmOffsetBlock], AscendC::GlobalTensor<int32_t>(),
-                                layoutPTemp, layoutVTemp, layoutOTmp, actualBlockShapePV, seg, numSeg, blockSize,
-                                kvSeqlenLocal, static_cast<uint32_t>(strideV), 1U, softmaxReady, false, gV[gmOffsetV], 0);
+                    blockMmadPV(gP[gmOffsetBlock], gV[gmOffsetV], gOTmp[gmOffsetBlock],
+                                AscendC::GlobalTensor<int32_t>(), layoutPTemp, layoutVTemp, layoutOTmp,
+                                actualBlockShapePV, seg, numSeg, blockSize, kvSeqlenLocal,
+                                static_cast<uint32_t>(strideV), 1U, softmaxReady, false, gV[gmOffsetV], 0);
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
 #endif
 #ifdef __DAV_C220_VEC__
@@ -968,7 +966,7 @@ class MlaDecodeGemvKernel {
                     }
                 }
             }
-        }  // ---- G1：结束 head 分块循环
+        } // ---- G1：结束 head 分块循环
 
 #ifdef __DAV_C220_CUBE__
         // D2：与 prelaunch 成对裁剪（见上），M_MTE1 4..7、MTE1_MTE2 2/7 无对应置位。
@@ -1017,8 +1015,7 @@ class MlaDecodeGemvKernel {
                 // into both O and LSE; the LSE head stride is total_q.
                 combineScale(qHeads, tilingData->totalSplitNodeNum, embedV, tilingData->splitInfo, gLseFD, gOFD, gO,
                              gActualQseqlen, true, maxQSeqlen,
-                             (EpilogueRescaleO::LSE_MODE == Catlass::Epilogue::LseModeT::OUT_ONLY), gLse,
-                             totalQTokens);
+                             (EpilogueRescaleO::LSE_MODE == Catlass::Epilogue::LseModeT::OUT_ONLY), gLse, totalQTokens);
             } else {
                 combineScale(qHeads, tilingData->totalSplitNodeNum, embedV, tilingData->splitInfo, gLseFD, gOFD, gO,
                              AscendC::GlobalTensor<int32_t>(), false, maxQSeqlen,
@@ -1077,9 +1074,9 @@ class MlaDecodeGemvKernel {
                                        AscendC::GlobalTensor<int32_t> gSeqUsed, bool hasSeqUsed)
     {
         if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
-            return hasSeqUsed ? static_cast<uint32_t>(gSeqUsed.GetValue(b))
-                              : static_cast<uint32_t>(gKvSeq.GetValue(b + 1)) -
-                                    static_cast<uint32_t>(gKvSeq.GetValue(b));
+            return hasSeqUsed
+                       ? static_cast<uint32_t>(gSeqUsed.GetValue(b))
+                       : static_cast<uint32_t>(gKvSeq.GetValue(b + 1)) - static_cast<uint32_t>(gKvSeq.GetValue(b));
         } else {
             return static_cast<uint32_t>(gKvSeq.GetValue(b));
         }
@@ -1147,9 +1144,8 @@ __global__ __aicore__ void MlaDecodeGemv(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k
     using KernelType =
         MlaDecodeGemvKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, INPUT_LAYOUT>;
 
-    FAIKernelParams params{q, k,       v,       nullptr, nullptr, actualQseqlen, actualKvseqlen, o,
-                           lse, workspace, tiling, nullptr, nullptr, nullptr, seqUsedKv,
-                           kvSeqlenAllocated, qv};
+    FAIKernelParams params{q,         k,      v,       nullptr, nullptr, actualQseqlen, actualKvseqlen,    o, lse,
+                           workspace, tiling, nullptr, nullptr, nullptr, seqUsedKv,     kvSeqlenAllocated, qv};
     KernelType kernel;
     kernel(params);
 }

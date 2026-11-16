@@ -2448,11 +2448,16 @@ def test_v3_mla_flash_attn_varlen_func(case):
     out_ref, _, out_pt, _ = _mla_golden(case, q, k, v, qv, scale)
 
     out = flash_attn_varlen_func(
-        q[0], k[0], v[0],
-        make_cu_seqlens([sq]).npu(), make_cu_seqlens([sk]).npu(),
-        max_seqlen_q=sq, max_seqlen_k=sk,
+        q[0],
+        k[0],
+        v[0],
+        make_cu_seqlens([sq]).npu(),
+        make_cu_seqlens([sk]).npu(),
+        max_seqlen_q=sq,
+        max_seqlen_k=sk,
         qv=None if qv is None else qv[0],
-        softmax_scale=scale, causal=is_causal,
+        softmax_scale=scale,
+        causal=is_causal,
     )
     assert tuple(out.shape) == (sq, heads, dv)
     assert_fa_close(out, out_ref[0], out_pt[0], name="v3_mla_varlen_out")
@@ -2469,7 +2474,13 @@ def test_v3_mla_flash_attn_with_kvcache(case):
 
     # k/v are handed over as the only cache content, so cache_seqlens == kv_seqlen.
     out = flash_attn_with_kvcache(
-        q, k, v, qv=qv, cache_seqlens=sk, softmax_scale=scale, causal=is_causal,
+        q,
+        k,
+        v,
+        qv=qv,
+        cache_seqlens=sk,
+        softmax_scale=scale,
+        causal=is_causal,
     )
     assert tuple(out.shape) == (batch, sq, heads, dv)
     assert_fa_close(out, out_ref, out_pt, name="v3_mla_kvcache_out")

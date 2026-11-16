@@ -98,8 +98,8 @@ static FwdMaskDerivation DeriveFwdMask(bool causal, int64_t window_left, int64_t
     return derived;
 }
 
-static bool IsMlaDecodeGemvShape(bool hasQv, int64_t numHeads, int64_t numHeadsK, int64_t headSizeOg,
-                                 int64_t headSizeV, bool pagedKv, bool isLocal, bool isCausal, int64_t seqlenQ)
+static bool IsMlaDecodeGemvShape(bool hasQv, int64_t numHeads, int64_t numHeadsK, int64_t headSizeOg, int64_t headSizeV,
+                                 bool pagedKv, bool isLocal, bool isCausal, int64_t seqlenQ)
 {
     return hasQv && (numHeads <= 32) && (numHeadsK == 1) && (headSizeV == 512) && (headSizeOg + headSizeV == 576) &&
            !pagedKv && !isLocal && !isCausal && (seqlenQ == 1);
@@ -392,8 +392,8 @@ std::vector<at::Tensor> mha_fwd(
                     "FlashAttention only supports head dimension in [1, 256]");
     }
     if (is_mla) {
-        TORCH_CHECK(head_size_v >= 1 && head_size_v <= 512,
-                    "MLA value head dimension must be in [1, 512]; got ", head_size_v);
+        TORCH_CHECK(head_size_v >= 1 && head_size_v <= 512, "MLA value head dimension must be in [1, 512]; got ",
+                    head_size_v);
     }
     TORCH_CHECK(k.size(-1) == head_size_og, "query and key must have the same head dimension");
     TORCH_CHECK(is_mla || v.size(-1) == head_size_og, "query and value must have the same head dimension");
@@ -487,9 +487,8 @@ std::vector<at::Tensor> mha_fwd(
         return {out, softmaxlse, out_accum, softmax_lse_accum};
     }
 
-    const bool gemvShapeEarly =
-        IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v, paged_KV,
-                             is_local, is_causal, seqlen_q);
+    const bool gemvShapeEarly = IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v,
+                                                     paged_KV, is_local, is_causal, seqlen_q);
     if (scheduler_metadata_.has_value() && !gemvShapeEarly) {
         auto schedMd = scheduler_metadata_.value();
         TORCH_CHECK(schedMd.dtype() == at::kByte, "scheduler_metadata must be a byte tensor");
@@ -635,15 +634,14 @@ std::vector<at::Tensor> mha_fwd(
                                (maxKVSeqlenCalc >= static_cast<int64_t>(blockDim) * 512);
         const bool isShortSeq = (static_cast<double>(numTasks) <= 0.4 * blockDim) && (maxKVSeqlenCalc >= 1024);
         // Absorbed-MLA decode kernel (128-token KV tiles), chosen by shape.
-        const bool mlaDecodeGemvShape =
-            IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v, paged_KV,
-                                 is_local, is_causal, seqlen_q);
+        const bool mlaDecodeGemvShape = IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v,
+                                                             paged_KV, is_local, is_causal, seqlen_q);
         mlaDecodeGemv = mlaDecodeGemvShape;
         TORCH_CHECK(num_splits <= 1 || (paged_KV && is_varlen_q) || mlaDecodeGemv,
                     "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
-        flashDecodeFlag = (paged_KV && is_varlen_q && !is_local && (maxQSeqlenCalc * groupSize <= 128) &&
-                          (maxQSeqlenCalc <= 16) && (maxKVSeqlenCalc >= 1024) && (minQSeqlenCalc > 0) &&
-                          (isLongSeq || isShortSeq));
+        flashDecodeFlag =
+            (paged_KV && is_varlen_q && !is_local && (maxQSeqlenCalc * groupSize <= 128) && (maxQSeqlenCalc <= 16) &&
+             (maxKVSeqlenCalc >= 1024) && (minQSeqlenCalc > 0) && (isLongSeq || isShortSeq));
         if (mlaDecodeGemv) {
             // The dedicated kernel has its own KV split; generic FD geometry
             // does not apply.
@@ -686,8 +684,7 @@ std::vector<at::Tensor> mha_fwd(
         uint64_t splitOTotalSize = tiling_cpu_ptr->get_splitOTotalSize();
         // The gemv kernel keeps scratch tables at the workspace front; its FD
         // partials live past them; generic path keeps partials at offset 0.
-        uint64_t partialBase =
-            mlaDecodeGemv ? (mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize) : 0U;
+        uint64_t partialBase = mlaDecodeGemv ? (mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize) : 0U;
         int64_t workSpaceSize = static_cast<int64_t>(mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize +
                                                      splitLseTotalSize + splitOTotalSize);
 
@@ -701,7 +698,9 @@ std::vector<at::Tensor> mha_fwd(
                             "splitLseTotalSize must be a multiple of sizeof(float)");
                 at::Tensor lse_init = at::full({static_cast<int64_t>(splitLseTotalSize / sizeof(float))},
                                                -std::numeric_limits<float>::infinity(), float_opts);
-                workspace_tensor.narrow(/*dim=*/0, /*start=*/static_cast<int64_t>(partialBase), static_cast<int64_t>(splitLseTotalSize))
+                workspace_tensor
+                    .narrow(/*dim=*/0, /*start=*/static_cast<int64_t>(partialBase),
+                            static_cast<int64_t>(splitLseTotalSize))
                     .copy_(lse_init.view(at::kByte));
             }
             if (splitOTotalSize > 0) {
@@ -709,7 +708,8 @@ std::vector<at::Tensor> mha_fwd(
                             "splitOTotalSize must be a multiple of sizeof(float)");
                 at::Tensor o_init = at::zeros({static_cast<int64_t>(splitOTotalSize / sizeof(float))}, float_opts);
                 workspace_tensor
-                    .narrow(/*dim=*/0, static_cast<int64_t>(partialBase + splitLseTotalSize), static_cast<int64_t>(splitOTotalSize))
+                    .narrow(/*dim=*/0, static_cast<int64_t>(partialBase + splitLseTotalSize),
+                            static_cast<int64_t>(splitOTotalSize))
                     .copy_(o_init.view(at::kByte));
             }
         }

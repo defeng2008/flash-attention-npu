@@ -253,15 +253,13 @@ class MlaDecodePersistRescale {
         }
     }
 
-    __aicore__ inline void SubCoreCompute(AscendC::GlobalTensor<ElementOutput> gOutput,
-                                          AscendC::GlobalTensor<ElementInput> gInput,
-                                          AscendC::GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput,
-                                          const LayoutInput& layoutInput, const LayoutLse& layoutLse,
-                                          uint32_t qNThisSubBlock, uint32_t qSThisSubBlock, uint32_t totalRowNum,
-                                          uint32_t isFirstStackTile, uint32_t isLastStackTile,
-                                          uint32_t curStackTileMod, uint32_t taskStateSlot, uint32_t isLastRowLoop,
-                                          uint32_t rowOffsetLoop, uint32_t outputStride, uint32_t oHeadStride,
-                                          bool fdMode, AscendC::GlobalTensor<float> gPartialO)
+    __aicore__ inline void
+    SubCoreCompute(AscendC::GlobalTensor<ElementOutput> gOutput, AscendC::GlobalTensor<ElementInput> gInput,
+                   AscendC::GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput,
+                   const LayoutInput& layoutInput, const LayoutLse& layoutLse, uint32_t qNThisSubBlock,
+                   uint32_t qSThisSubBlock, uint32_t totalRowNum, uint32_t isFirstStackTile, uint32_t isLastStackTile,
+                   uint32_t curStackTileMod, uint32_t taskStateSlot, uint32_t isLastRowLoop, uint32_t rowOffsetLoop,
+                   uint32_t outputStride, uint32_t oHeadStride, bool fdMode, AscendC::GlobalTensor<float> gPartialO)
     {
         uint32_t curRowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -304,8 +302,8 @@ class MlaDecodePersistRescale {
             if (embed % FLOAT_VECTOR_SIZE > 0) {
                 SetMask(embed % FLOAT_VECTOR_SIZE);
                 AscendC::Mul<float, false>(goPersistUbTensor[embed / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE],
-                                           goPersistUbTensor[embed / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE],
-                                           tvUbTensor, (uint64_t)0, curRowNum,
+                                           goPersistUbTensor[embed / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE], tvUbTensor,
+                                           (uint64_t)0, curRowNum,
                                            AscendC::BinaryRepeatParams(1, 1, 0, embedRound / FLOAT_BLOCK_SIZE,
                                                                        embedRound / FLOAT_BLOCK_SIZE, 1));
                 AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
@@ -356,8 +354,8 @@ class MlaDecodePersistRescale {
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                CopyOToGmFp32(gPartialO, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock,
-                              embed, embedRound, outputStride, oHeadStride);
+                CopyOToGmFp32(gPartialO, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
+                              embedRound, outputStride, oHeadStride);
             } else {
                 // *** gl_block = expand_to_block(gl)
                 AscendC::Brcb(tvUbTensor.ReinterpretCast<uint32_t>(),
@@ -383,24 +381,24 @@ class MlaDecodePersistRescale {
                     AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
                 }
                 AscendC::PipeBarrier<PIPE_V>();
-            // *** go = castfp32to16(go)
-            if (std::is_same<ElementOutput, bfloat16_t>::value) {
-                AscendC::Cast<ElementOutput, float, false>(
-                    goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_RINT, (uint64_t)0,
-                    (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
-                    AscendC::UnaryRepeatParams(1, 1, 4, 8));
-            } else {
-                AscendC::Cast<ElementOutput, float, false>(
-                    goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_NONE, (uint64_t)0,
-                    (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
-                    AscendC::UnaryRepeatParams(1, 1, 4, 8));
-            }
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            // *** 写 O 到 GM
-            AscendC::PipeBarrier<PIPE_V>();
-            CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
-                      embedRound, outputStride, oHeadStride);
+                // *** go = castfp32to16(go)
+                if (std::is_same<ElementOutput, bfloat16_t>::value) {
+                    AscendC::Cast<ElementOutput, float, false>(
+                        goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_RINT, (uint64_t)0,
+                        (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
+                        AscendC::UnaryRepeatParams(1, 1, 4, 8));
+                } else {
+                    AscendC::Cast<ElementOutput, float, false>(
+                        goUbTensor16, goPersistUbTensor, AscendC::RoundMode::CAST_NONE, (uint64_t)0,
+                        (curRowNum * embedRound + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
+                        AscendC::UnaryRepeatParams(1, 1, 4, 8));
+                }
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                // *** 写 O 到 GM
+                AscendC::PipeBarrier<PIPE_V>();
+                CopyOToGm(gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed,
+                          embedRound, outputStride, oHeadStride);
             }
             if constexpr (LSE_MODE == Catlass::Epilogue::LseModeT::OUT_ONLY) {
                 if (isLastRowLoop) {
@@ -431,16 +429,14 @@ class MlaDecodePersistRescale {
         }
     }
 
-    __aicore__ inline void operator()(AscendC::GlobalTensor<ElementOutput> gOutput,
-                                      AscendC::GlobalTensor<ElementInput> gInput,
-                                      AscendC::GlobalTensor<ElementUpdate> gUpdate,
-                                      AscendC::GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput,
-                                      const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
-                                      const LayoutLse& layoutLse, GemmCoord actualBlockShape, const TaskPlan& taskPlan,
-                                      Arch::CrossCoreFlag pvReady, uint32_t qSBlockSize, uint32_t qNBlockSize,
-                                      uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
-                                      uint32_t taskStateSlot, uint32_t outputStride, uint32_t oHeadStride,
-                                      bool fdMode, AscendC::GlobalTensor<float> gPartialO)
+    __aicore__ inline void
+    operator()(AscendC::GlobalTensor<ElementOutput> gOutput, AscendC::GlobalTensor<ElementInput> gInput,
+               AscendC::GlobalTensor<ElementUpdate> gUpdate, AscendC::GlobalTensor<ElementLse> gLse,
+               const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
+               const LayoutLse& layoutLse, GemmCoord actualBlockShape, const TaskPlan& taskPlan,
+               Arch::CrossCoreFlag pvReady, uint32_t qSBlockSize, uint32_t qNBlockSize, uint32_t isFirstStackTile,
+               uint32_t isLastStackTile, uint32_t curStackTileMod, uint32_t taskStateSlot, uint32_t outputStride,
+               uint32_t oHeadStride, bool fdMode, AscendC::GlobalTensor<float> gPartialO)
     {
         (void)gUpdate;
         (void)layoutUpdate;
@@ -453,8 +449,7 @@ class MlaDecodePersistRescale {
         const uint32_t inRowOffsetThisSubBlock = taskPlan.inRowOffsetThisSubBlock;
         uint32_t outHeadOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock;
         uint32_t qSThisSubBlock = taskPlan.qSThisSubBlock;
-        int64_t outOffsetSubBlock =
-            static_cast<int64_t>(outHeadOffsetThisSubBlock) * oHeadStride;
+        int64_t outOffsetSubBlock = static_cast<int64_t>(outHeadOffsetThisSubBlock) * oHeadStride;
 
         uint32_t outLseRowOffsetThisSubBlock = (qNBlockSize == 1U) ? 0 : subBlockIdx * qNSplitSubBlock;
         uint32_t outLseColOffsetThisSubBlock = (qNBlockSize == 1U) ? inRowOffsetThisSubBlock : 0;
@@ -471,27 +466,26 @@ class MlaDecodePersistRescale {
         uint32_t rowLoop = taskPlan.rowLoop;
         for (uint32_t rowLoopIdx = 0; rowLoopIdx < rowLoop; rowLoopIdx++) {
             uint32_t rowOffsetLoop = rowLoopIdx * taskPlan.rowNumTile;
-            uint32_t rowActualCurLoop =
-                (rowLoopIdx == (rowLoop - 1U)) ? inRowActualThisSubBlock - rowLoopIdx * taskPlan.rowNumTile
-                                               : taskPlan.rowNumTile;
+            uint32_t rowActualCurLoop = (rowLoopIdx == (rowLoop - 1U))
+                                            ? inRowActualThisSubBlock - rowLoopIdx * taskPlan.rowNumTile
+                                            : taskPlan.rowNumTile;
 
-            int64_t offsetOutput = static_cast<int64_t>(rowLoopIdx * taskPlan.rowNumTile / qSThisSubBlock) *
-                                       oHeadStride +
-                                   outOffsetSubBlock;
+            int64_t offsetOutput =
+                static_cast<int64_t>(rowLoopIdx * taskPlan.rowNumTile / qSThisSubBlock) * oHeadStride +
+                outOffsetSubBlock;
             auto gOutputCurLoop = gOutput[offsetOutput];
             auto gPartialOCurLoop = gPartialO[offsetOutput];
             auto layoutOutputCurLoop = layoutOutput;
-            int64_t offsetInput =
-                layoutInput.GetOffset(MatrixCoord(inRowOffsetThisSubBlock + rowOffsetLoop, 0));
+            int64_t offsetInput = layoutInput.GetOffset(MatrixCoord(inRowOffsetThisSubBlock + rowOffsetLoop, 0));
             auto gInputCurLoop = gInput[offsetInput];
             auto layoutInputCurLoop = layoutInput.GetTileLayout(MatrixCoord(rowActualCurLoop, embed));
 
             if (rowLoopIdx == 0) {
                 Arch::CrossCoreWaitFlag(pvReady);
             }
-            SubCoreCompute(gOutputCurLoop, gInputCurLoop, gLseThisSubBlock, layoutOutputCurLoop,
-                           layoutInputCurLoop, layoutOutLseThisSubBlock, qNThisSubBlock, qSThisSubBlock,
-                           inRowActualThisSubBlock, isFirstStackTile, isLastStackTile, curStackTileMod, taskStateSlot,
+            SubCoreCompute(gOutputCurLoop, gInputCurLoop, gLseThisSubBlock, layoutOutputCurLoop, layoutInputCurLoop,
+                           layoutOutLseThisSubBlock, qNThisSubBlock, qSThisSubBlock, inRowActualThisSubBlock,
+                           isFirstStackTile, isLastStackTile, curStackTileMod, taskStateSlot,
                            (rowLoopIdx == rowLoop - 1U), rowOffsetLoop, outputStride, oHeadStride, fdMode,
                            gPartialOCurLoop);
         }
@@ -537,9 +531,9 @@ class MlaDecodeGemvKernel {
     // KV-split reduction (multi-core path only). Group table host-written into
     // tiling's splitInfo[25]; row count < 25 so the 25-row table suffices.
     using SplitInfoType = splitNode[25];
-    using CombineScaleType = Catlass::Epilogue::Block::CombineScale<Gemm::GemmType<ElementO, LayoutO>,
-                                                                    Gemm::GemmType<ElementLse, LayoutLse>,
-                                                                    SplitInfoType>;
+    using CombineScaleType =
+        Catlass::Epilogue::Block::CombineScale<Gemm::GemmType<ElementO, LayoutO>, Gemm::GemmType<ElementLse, LayoutLse>,
+                                               SplitInfoType>;
 
     static constexpr uint32_t STACK_SLOTS = PRE_LAUNCH + 1;
 
@@ -549,8 +543,7 @@ class MlaDecodeGemvKernel {
     {
         // FA4 hands the scheduling tables (static) and the per-call scalars
         // (runtime) over as two separate device buffers.
-        __gm__ FAInferStaticTilingData* tilingData =
-            reinterpret_cast<__gm__ FAInferStaticTilingData*>(params.tiling);
+        __gm__ FAInferStaticTilingData* tilingData = reinterpret_cast<__gm__ FAInferStaticTilingData*>(params.tiling);
         __gm__ FAInferRuntimeData* runtimeData = reinterpret_cast<__gm__ FAInferRuntimeData*>(params.runtime);
         mm1OutSize = tilingData->mm1OutSize;
         smOnlineOutSize = tilingData->smOnlineOutSize;
@@ -558,8 +551,8 @@ class MlaDecodeGemvKernel {
         updateSize = tilingData->UpdateSize;
         batch = tilingData->batch;
         qHeads = tilingData->numHeads;
-        kvHeads = 1;                  // D2: 闸门 IsMlaDecodeGemvShape 保证 numHeadsK==1
-        embed = MLA_DECODE_ROPE_DIM;  // D2: 闸门保证 headSizeOg+headSizeV==576 && headSizeV==512
+        kvHeads = 1;                 // D2: 闸门 IsMlaDecodeGemvShape 保证 numHeadsK==1
+        embed = MLA_DECODE_ROPE_DIM; // D2: 闸门保证 headSizeOg+headSizeV==576 && headSizeV==512
         embedV = MLA_DECODE_LATENT_DIM;
         embedQK = MLA_DECODE_QK_DIM;
         maxQSeqlen = tilingData->maxQSeqlen;
@@ -625,8 +618,7 @@ class MlaDecodeGemvKernel {
         AscendC::GlobalTensor<ElementOTmp> gOTmp;
         gOTmp.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workSpace + mm1OutSize + smOnlineOutSize));
         AscendC::GlobalTensor<ElementOTmp> gOUpdate;
-        gOUpdate.SetGlobalBuffer(
-            (__gm__ ElementOTmp*)(params.workSpace + mm1OutSize + smOnlineOutSize + mm2OutSize));
+        gOUpdate.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workSpace + mm1OutSize + smOnlineOutSize + mm2OutSize));
 
         // FD partials live past this kernel's scratch tables (see the host's
         // partialBase): [LSE f32][O f32], group-major, written by each core.
@@ -634,8 +626,7 @@ class MlaDecodeGemvKernel {
         AscendC::GlobalTensor<ElementLse> gLseFD;
         gLseFD.SetGlobalBuffer((__gm__ ElementLse*)(params.workSpace + partialBase));
         AscendC::GlobalTensor<ElementLse> gOFD;
-        gOFD.SetGlobalBuffer(
-            (__gm__ ElementLse*)(params.workSpace + partialBase + tilingData->splitLseTotalSize));
+        gOFD.SetGlobalBuffer((__gm__ ElementLse*)(params.workSpace + partialBase + tilingData->splitLseTotalSize));
 
         uint32_t coreIdx = AscendC::GetBlockIdx();
 #ifdef __DAV_C220_CUBE__
@@ -717,8 +708,8 @@ class MlaDecodeGemvKernel {
         // BSND/BNSD LSE is (B,H,maxQSeqlen); packed TND is (H,total_q).
         // FD partial is group-major [split][head], so its per-head stride is 1.
         const bool lseSplitActive = tilingData->splitLseTotalSize > 0U;
-        LayoutLse layoutLse(
-            qHeads, (INPUT_LAYOUT == FaiKenel::inputLayout::TND && !lseSplitActive) ? totalQTokens : maxQSeqlen);
+        LayoutLse layoutLse(qHeads, (INPUT_LAYOUT == FaiKenel::inputLayout::TND && !lseSplitActive) ? totalQTokens
+                                                                                                    : maxQSeqlen);
 #endif
         // fdMode is armed only when the host splits KV across cores (it zeroes
         // splitLseTotalSize otherwise); whole-batch cores skip CombineScale.
@@ -760,226 +751,231 @@ class MlaDecodeGemvKernel {
             LayoutUpdate layoutUpdate(rowNum, embedV, embedRoundV);
 #endif
 
-        // ---- 定位起点（每核一次，O(batch)）：沿 batch 累加 task 数与 partial 基址，
-        // 定位 taskStart 所在 batch/split（b/s 与 lseBase/oBase 成为 running 态）。
-        uint32_t b = 0;
-        uint32_t t = 0;
-        uint32_t kvLenB = 0;
-        uint32_t segCountB = 0;
-        uint32_t blocksPerSplit = 1U;
-        uint32_t actualSplits = 0U;
-        int64_t lseBase = 0;
-        int64_t oBase = 0;
-        for (; b < batch; ++b) {
-            kvLenB = KvLenOf(b, gActualKvseqlen, gSeqUsedKv, hasSeqUsedKv) + kvNewSeqlen;
-            segCountB = CeilDiv(kvLenB, MLA_DECODE_KV_TILE);
-            if (segCountB == 0U) {
-                continue;
-            }
-            blocksPerSplit = CeilDiv(segCountB, nsplitPerBatch);
-            if (blocksPerSplit == 0U) {
-                blocksPerSplit = 1U;
-            }
-            actualSplits = CeilDiv(segCountB, blocksPerSplit);
-            if (t + actualSplits > taskStart) {
-                break;
-            }
-            t += actualSplits;
-            lseBase += static_cast<int64_t>(actualSplits) * qHeads;
-            oBase += static_cast<int64_t>(actualSplits) * qHeads * embedV;
-        }
-        uint32_t s = taskStart - t;
-
-        for (uint32_t taskIdx = taskStart; taskIdx < taskEnd; ++taskIdx) {
-            const uint32_t BIdx = b;
-            // 本 task 覆盖本 batch 的 [segStart, segEnd) 段，与宿主
-            // splitKvForGemvDecode 的 blocksPerSplit/actualSplits 规则逐字一致。
-            const uint32_t segStart = s * blocksPerSplit;
-            const uint32_t segEnd = AscendC::Std::min(segStart + blocksPerSplit, segCountB);
-            const uint32_t kvSegBase = segStart * MLA_DECODE_KV_TILE;
-            const uint32_t kvSeqlenLocal =
-                (segEnd > segStart) ? (AscendC::Std::min(kvLenB, segEnd * MLA_DECODE_KV_TILE) - kvSegBase) : 0U;
-            // blockMmadPV 的 nIdx/nLoop/blockSize 为非 const 引用（多块遍历原地推进），须传
-            // 非 const 左值；本 kernel 每段恰一个 KV tile，仅需满足签名约束。
-            uint32_t numSeg = (segEnd > segStart) ? (segEnd - segStart) : 0U;
-
-            uint64_t qBOffset;
-            uint64_t qvBOffset;
-            uint64_t kBOffset;
-            uint64_t vBOffset;
-            uint64_t gmOffsetO;
-            uint64_t gmOffsetLse;
-            if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
-                qBOffset = static_cast<uint64_t>(BIdx) * qHeads * qHeadStride;
-                qvBOffset = static_cast<uint64_t>(BIdx) * qHeads * qvHeadStride;
-                kBOffset = static_cast<uint64_t>(BIdx) * kvHeads * kvHeadStrideK +
-                           static_cast<uint64_t>(kvSegBase) * strideK;
-                vBOffset = static_cast<uint64_t>(BIdx) * kvHeads * kvHeadStrideV +
-                           static_cast<uint64_t>(kvSegBase) * strideV;
-                gmOffsetO = static_cast<uint64_t>(BIdx) * maxQSeqlen * strideO;
-                gmOffsetLse = static_cast<uint64_t>(BIdx) * maxQSeqlen * qHeads;
-            } else if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
-                // Packed TND keeps BSND token-major strides; per-seq bases are
-                // cu_seqlens prefixes. Output (total_q,H,Dv); LSE (H,total_q).
-                const uint64_t prevQSeqlenSum = static_cast<uint64_t>(gActualQseqlen.GetValue(BIdx));
-                const uint64_t prevKvSeqlenSum = static_cast<uint64_t>(gActualKvseqlen.GetValue(BIdx));
-                qBOffset = prevQSeqlenSum * strideQ;
-                qvBOffset = prevQSeqlenSum * strideQv;
-                kBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideK;
-                vBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideV;
-                gmOffsetO = prevQSeqlenSum * strideO;
-                gmOffsetLse = prevQSeqlenSum;
-            } else {
-                // BSND dense: K/V token-major, same used KV len per batch.
-                // So the base steps by it; kvSeqlenAllocated is BNSD-only.
-                const uint64_t prevQSeqlenSum = static_cast<uint64_t>(BIdx) * maxQSeqlen;
-                const uint64_t prevKvSeqlenSum = static_cast<uint64_t>(gActualKvseqlen.GetValue(0)) * BIdx;
-                qBOffset = prevQSeqlenSum * strideQ;
-                qvBOffset = prevQSeqlenSum * strideQv;
-                kBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideK;
-                vBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideV;
-                gmOffsetO = static_cast<uint64_t>(BIdx) * maxQSeqlen * strideO;
-                gmOffsetLse = static_cast<uint64_t>(BIdx) * maxQSeqlen * qHeads;
-            }
-            const uint64_t gmOffsetQ = qBOffset + headBase * qHeadStride;
-            const uint64_t gmOffsetQv = qvBOffset + headBase * qvHeadStride;
-            const uint64_t gmOffsetK = kBOffset;
-            const uint64_t gmOffsetV = vBOffset;
-            // O 的输出由 epilogue 用块内 head 索引 + oHeadStride 写，所以这里把张量
-            // 基址抬到本 head 块起点（direct / FD 同一个 oHeadStride）。
-            const uint64_t gmOffsetOHead = gmOffsetO + headBase * oHeadStride;
-
-#ifdef __DAV_C220_CUBE__
-            blockMmadQK.resetBlockStart(0U, pagedBlockSize);
-            blockMmadQK.SetMlaLatentDim(embedV);
-            blockMmadQK.SetMlaLatentQ(static_cast<uint32_t>(qvHeadStride), static_cast<uint32_t>(strideQv));
-            blockMmadQK.SetMlaRopeQ(gQ[gmOffsetQ], static_cast<uint32_t>(qHeadStride), static_cast<uint32_t>(strideQ));
-            blockMmadQK.SetMlaRopeK(gK[gmOffsetK], static_cast<uint32_t>(strideK), 0);
-            blockMmadQK.loadQGM(gQv[gmOffsetQv], layoutQ, rowNum, qNBlockSize, static_cast<uint32_t>(strideQv));
-            // P0 (G2)：Q L1 槽位回补挪到本 task 段循环之后（见下）。若在此立即 SetFlag，
-            // 下一 task 的 loadQGM 会抢在本 task 末次 copyL1ToL0A 前重写 Q 区，构成 WAR hazard。
-#endif
-            // The running max/sum state must persist across all KV tiles of one
-            // task, so its slot is per batch and not per tile.
-            const uint32_t stateSlot = BIdx % STACK_SLOTS;
-            (void)taskStateSequence;
-
-            // 段间软件流水（P1）：prologue 发 MM1(0)+softmax(0)，稳态重叠 cube 搬运/MMA 与
-            // vector softmax/rescale（UB 按 slot=seg%STACK_SLOTS 双缓冲），旗标按段复用。
-            AscendC::GlobalTensor<ElementLse> gLseWrite = fdMode ? gLseFD : gLse;
-            const uint64_t gmOffsetLseWrite =
-                (fdMode ? static_cast<uint64_t>(lseBase + static_cast<int64_t>(s) * qHeads) : gmOffsetLse) +
-                headBase * static_cast<uint64_t>(lseHeadStride);
-            const uint64_t gmOffsetOWrite =
-                (fdMode ? static_cast<uint64_t>(oBase + static_cast<int64_t>(s) * qHeads * embedV) : gmOffsetO) +
-                headBase * oHeadStride;
-
-            // blockMmadPV 的 blockSize 形参是非 const 引用，需非 const 左值。
-            uint32_t blockSize = pagedBlockSize;
-            if (numSeg > 0U) {
-                // ---- prologue：MM1(0) + softmax(0) ----
-                const uint32_t stackSeqTile0 = AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal);
-                const uint64_t gmOffsetBlock0 = wsSlotBase;
-                GemmCoord actualBlockShapeQK0{rowNum, stackSeqTile0, embedQK};
-                LayoutS layOutS0(rowNum, stackSeqTile0, MLA_DECODE_KV_TILE);
-#ifdef __DAV_C220_CUBE__
-                blockMmadQK(gQ[gmOffsetQ], gV[gmOffsetV], gS[gmOffsetBlock0], AscendC::GlobalTensor<int32_t>(),
-                            layoutQ, layoutKLatent, layOutS0, actualBlockShapeQK0, 0U, numSeg, blockSize,
-                            static_cast<uint32_t>(strideV), false, gK[gmOffsetK], 0);
-                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
-#endif
-#ifdef __DAV_C220_VEC__
-                LayoutP layOutP0(rowNum, stackSeqTile0, MLA_DECODE_KV_TILE);
-                // Decode is maskless: take the 16-param generic FA4 no-mask
-                // overload, NOT the 22-arg SWA one; MTE3_V deadlocks AIV.
-                epilogueOnlineSoftmax(gP[gmOffsetBlock0], gS[gmOffsetBlock0], layOutP0, layOutS0, actualBlockShapeQK0,
-                                      1U, 0U, qSBlockSize, qNBlockSize, 0U, stateSlot, qkReady, softmaxPingPongFlag,
-                                      fdMode, false, false);
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
-#endif
-            }
-            for (uint32_t seg = 0; seg < numSeg; ++seg) {
-                const bool hasNext = (seg + 1U < numSeg);
-                const bool firstStack = (seg == 0U);
-                const bool lastStack = (seg + 1U >= numSeg);
-                // 前瞻段（seg+1）参数：MM1 + softmax。
-                const uint32_t kvSStartNext = (seg + 1U) * MLA_DECODE_KV_TILE;
-                const uint32_t stackSeqTileNext = AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal - kvSStartNext);
-                const uint32_t slotNext = (seg + 1U) % STACK_SLOTS;
-                const uint64_t gmOffsetBlockNext = wsSlotBase + static_cast<uint64_t>(slotNext) * WORKSPACE_BLOCK_SIZE_DB;
-                GemmCoord actualBlockShapeQKNext{rowNum, stackSeqTileNext, embedQK};
-                LayoutS layOutSNext(rowNum, stackSeqTileNext, MLA_DECODE_KV_TILE);
-                // 当前段（seg）参数：MM2 + rescale。
-                const uint32_t kvSStart = seg * MLA_DECODE_KV_TILE;
-                const uint32_t stackSeqTile = AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal - kvSStart);
-                const uint32_t slot = seg % STACK_SLOTS;
-                const uint64_t gmOffsetBlock = wsSlotBase + static_cast<uint64_t>(slot) * WORKSPACE_BLOCK_SIZE_DB;
-                GemmCoord actualBlockShapePV{rowNum, embedV, stackSeqTile};
-
-#ifdef __DAV_C220_CUBE__
-                if (hasNext) {
-                    blockMmadQK(gQ[gmOffsetQ], gV[gmOffsetV], gS[gmOffsetBlockNext], AscendC::GlobalTensor<int32_t>(),
-                                layoutQ, layoutKLatent, layOutSNext, actualBlockShapeQKNext, seg + 1U, numSeg,
-                                blockSize, static_cast<uint32_t>(strideV), false, gK[gmOffsetK], 0);
-                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
+            // ---- 定位起点（每核一次，O(batch)）：沿 batch 累加 task 数与 partial 基址，
+            // 定位 taskStart 所在 batch/split（b/s 与 lseBase/oBase 成为 running 态）。
+            uint32_t b = 0;
+            uint32_t t = 0;
+            uint32_t kvLenB = 0;
+            uint32_t segCountB = 0;
+            uint32_t blocksPerSplit = 1U;
+            uint32_t actualSplits = 0U;
+            int64_t lseBase = 0;
+            int64_t oBase = 0;
+            for (; b < batch; ++b) {
+                kvLenB = KvLenOf(b, gActualKvseqlen, gSeqUsedKv, hasSeqUsedKv) + kvNewSeqlen;
+                segCountB = CeilDiv(kvLenB, MLA_DECODE_KV_TILE);
+                if (segCountB == 0U) {
+                    continue;
                 }
-                LayoutP layoutPTemp(rowNum, stackSeqTile, MLA_DECODE_KV_TILE);
-                blockMmadPV(gP[gmOffsetBlock], gV[gmOffsetV], gOTmp[gmOffsetBlock], AscendC::GlobalTensor<int32_t>(),
-                            layoutPTemp, layoutVTemp, layoutOTmp, actualBlockShapePV, seg, numSeg, blockSize,
-                            kvSeqlenLocal, static_cast<uint32_t>(strideV), 1U, softmaxReady, false, gV[gmOffsetV], 0);
-                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
-#endif
-#ifdef __DAV_C220_VEC__
-                if (hasNext) {
-                    LayoutP layOutPNext(rowNum, stackSeqTileNext, MLA_DECODE_KV_TILE);
-                    epilogueOnlineSoftmax(gP[gmOffsetBlockNext], gS[gmOffsetBlockNext], layOutPNext, layOutSNext,
-                                          actualBlockShapeQKNext, 0U, 0U, qSBlockSize, qNBlockSize, slotNext, stateSlot,
-                                          qkReady, softmaxPingPongFlag, fdMode, false, false);
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
+                blocksPerSplit = CeilDiv(segCountB, nsplitPerBatch);
+                if (blocksPerSplit == 0U) {
+                    blocksPerSplit = 1U;
                 }
-                epilogueRescaleO(gO[gmOffsetOHead], gOTmp[gmOffsetBlock], gOUpdate[wsUpdateBase],
-                                 gLseWrite[gmOffsetLseWrite], layoutO, layoutOTmp, layoutUpdate, layoutLse,
-                                 actualBlockShapePV, rescaleTaskPlan, pvReady, qSBlockSize, qNBlockSize, firstStack,
-                                 lastStack, slot, stateSlot, static_cast<uint32_t>(strideO),
-                                 static_cast<uint32_t>(oHeadStride), fdMode, gOFD[gmOffsetOWrite]);
-#endif
-            }
-#ifdef __DAV_C220_CUBE__
-            // P0 (G2)：本 task 段循环已结束、MTE1 已读完 Q L1 区，此时才归还 MTE1_MTE2
-            // EVENT_ID3，与 prelaunch 1 Set / drain 1 Wait 配平；消除 WAR hazard。
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
-#endif
-            // ---- 推进到下一个 task：split 内先递增 s；某 batch 的 split 用尽后重算下一
-            // 有工作 batch 并推进 lseBase/oBase（running 累加），b/s 等状态就地更新。
-            ++s;
-            if (s >= actualSplits) {
+                actualSplits = CeilDiv(segCountB, blocksPerSplit);
+                if (t + actualSplits > taskStart) {
+                    break;
+                }
+                t += actualSplits;
                 lseBase += static_cast<int64_t>(actualSplits) * qHeads;
                 oBase += static_cast<int64_t>(actualSplits) * qHeads * embedV;
-                s = 0;
-                bool found = false;
-                for (uint32_t nb = b + 1U; nb < batch; ++nb) {
-                    uint32_t kvLenN = KvLenOf(nb, gActualKvseqlen, gSeqUsedKv, hasSeqUsedKv) + kvNewSeqlen;
-                    uint32_t segCountN = CeilDiv(kvLenN, MLA_DECODE_KV_TILE);
-                    if (segCountN == 0U) {
-                        continue;
-                    }
-                    b = nb;
-                    kvLenB = kvLenN;
-                    segCountB = segCountN;
-                    blocksPerSplit = CeilDiv(segCountN, nsplitPerBatch);
-                    if (blocksPerSplit == 0U) {
-                        blocksPerSplit = 1U;
-                    }
-                    actualSplits = CeilDiv(segCountN, blocksPerSplit);
-                    found = true;
-                    break;
+            }
+            uint32_t s = taskStart - t;
+
+            for (uint32_t taskIdx = taskStart; taskIdx < taskEnd; ++taskIdx) {
+                const uint32_t BIdx = b;
+                // 本 task 覆盖本 batch 的 [segStart, segEnd) 段，与宿主
+                // splitKvForGemvDecode 的 blocksPerSplit/actualSplits 规则逐字一致。
+                const uint32_t segStart = s * blocksPerSplit;
+                const uint32_t segEnd = AscendC::Std::min(segStart + blocksPerSplit, segCountB);
+                const uint32_t kvSegBase = segStart * MLA_DECODE_KV_TILE;
+                const uint32_t kvSeqlenLocal =
+                    (segEnd > segStart) ? (AscendC::Std::min(kvLenB, segEnd * MLA_DECODE_KV_TILE) - kvSegBase) : 0U;
+                // blockMmadPV 的 nIdx/nLoop/blockSize 为非 const 引用（多块遍历原地推进），须传
+                // 非 const 左值；本 kernel 每段恰一个 KV tile，仅需满足签名约束。
+                uint32_t numSeg = (segEnd > segStart) ? (segEnd - segStart) : 0U;
+
+                uint64_t qBOffset;
+                uint64_t qvBOffset;
+                uint64_t kBOffset;
+                uint64_t vBOffset;
+                uint64_t gmOffsetO;
+                uint64_t gmOffsetLse;
+                if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) {
+                    qBOffset = static_cast<uint64_t>(BIdx) * qHeads * qHeadStride;
+                    qvBOffset = static_cast<uint64_t>(BIdx) * qHeads * qvHeadStride;
+                    kBOffset = static_cast<uint64_t>(BIdx) * kvHeads * kvHeadStrideK +
+                               static_cast<uint64_t>(kvSegBase) * strideK;
+                    vBOffset = static_cast<uint64_t>(BIdx) * kvHeads * kvHeadStrideV +
+                               static_cast<uint64_t>(kvSegBase) * strideV;
+                    gmOffsetO = static_cast<uint64_t>(BIdx) * maxQSeqlen * strideO;
+                    gmOffsetLse = static_cast<uint64_t>(BIdx) * maxQSeqlen * qHeads;
+                } else if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
+                    // Packed TND keeps BSND token-major strides; per-seq bases are
+                    // cu_seqlens prefixes. Output (total_q,H,Dv); LSE (H,total_q).
+                    const uint64_t prevQSeqlenSum = static_cast<uint64_t>(gActualQseqlen.GetValue(BIdx));
+                    const uint64_t prevKvSeqlenSum = static_cast<uint64_t>(gActualKvseqlen.GetValue(BIdx));
+                    qBOffset = prevQSeqlenSum * strideQ;
+                    qvBOffset = prevQSeqlenSum * strideQv;
+                    kBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideK;
+                    vBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideV;
+                    gmOffsetO = prevQSeqlenSum * strideO;
+                    gmOffsetLse = prevQSeqlenSum;
+                } else {
+                    // BSND dense: K/V token-major, same used KV len per batch.
+                    // So the base steps by it; kvSeqlenAllocated is BNSD-only.
+                    const uint64_t prevQSeqlenSum = static_cast<uint64_t>(BIdx) * maxQSeqlen;
+                    const uint64_t prevKvSeqlenSum = static_cast<uint64_t>(gActualKvseqlen.GetValue(0)) * BIdx;
+                    qBOffset = prevQSeqlenSum * strideQ;
+                    qvBOffset = prevQSeqlenSum * strideQv;
+                    kBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideK;
+                    vBOffset = (prevKvSeqlenSum + static_cast<uint64_t>(kvSegBase)) * strideV;
+                    gmOffsetO = static_cast<uint64_t>(BIdx) * maxQSeqlen * strideO;
+                    gmOffsetLse = static_cast<uint64_t>(BIdx) * maxQSeqlen * qHeads;
                 }
-                if (!found) {
-                    break;
+                const uint64_t gmOffsetQ = qBOffset + headBase * qHeadStride;
+                const uint64_t gmOffsetQv = qvBOffset + headBase * qvHeadStride;
+                const uint64_t gmOffsetK = kBOffset;
+                const uint64_t gmOffsetV = vBOffset;
+                // O 的输出由 epilogue 用块内 head 索引 + oHeadStride 写，所以这里把张量
+                // 基址抬到本 head 块起点（direct / FD 同一个 oHeadStride）。
+                const uint64_t gmOffsetOHead = gmOffsetO + headBase * oHeadStride;
+
+#ifdef __DAV_C220_CUBE__
+                blockMmadQK.resetBlockStart(0U, pagedBlockSize);
+                blockMmadQK.SetMlaLatentDim(embedV);
+                blockMmadQK.SetMlaLatentQ(static_cast<uint32_t>(qvHeadStride), static_cast<uint32_t>(strideQv));
+                blockMmadQK.SetMlaRopeQ(gQ[gmOffsetQ], static_cast<uint32_t>(qHeadStride),
+                                        static_cast<uint32_t>(strideQ));
+                blockMmadQK.SetMlaRopeK(gK[gmOffsetK], static_cast<uint32_t>(strideK), 0);
+                blockMmadQK.loadQGM(gQv[gmOffsetQv], layoutQ, rowNum, qNBlockSize, static_cast<uint32_t>(strideQv));
+                // P0 (G2)：Q L1 槽位回补挪到本 task 段循环之后（见下）。若在此立即 SetFlag，
+                // 下一 task 的 loadQGM 会抢在本 task 末次 copyL1ToL0A 前重写 Q 区，构成 WAR hazard。
+#endif
+                // The running max/sum state must persist across all KV tiles of one
+                // task, so its slot is per batch and not per tile.
+                const uint32_t stateSlot = BIdx % STACK_SLOTS;
+                (void)taskStateSequence;
+
+                // 段间软件流水（P1）：prologue 发 MM1(0)+softmax(0)，稳态重叠 cube 搬运/MMA 与
+                // vector softmax/rescale（UB 按 slot=seg%STACK_SLOTS 双缓冲），旗标按段复用。
+                AscendC::GlobalTensor<ElementLse> gLseWrite = fdMode ? gLseFD : gLse;
+                const uint64_t gmOffsetLseWrite =
+                    (fdMode ? static_cast<uint64_t>(lseBase + static_cast<int64_t>(s) * qHeads) : gmOffsetLse) +
+                    headBase * static_cast<uint64_t>(lseHeadStride);
+                const uint64_t gmOffsetOWrite =
+                    (fdMode ? static_cast<uint64_t>(oBase + static_cast<int64_t>(s) * qHeads * embedV) : gmOffsetO) +
+                    headBase * oHeadStride;
+
+                // blockMmadPV 的 blockSize 形参是非 const 引用，需非 const 左值。
+                uint32_t blockSize = pagedBlockSize;
+                if (numSeg > 0U) {
+                    // ---- prologue：MM1(0) + softmax(0) ----
+                    const uint32_t stackSeqTile0 = AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal);
+                    const uint64_t gmOffsetBlock0 = wsSlotBase;
+                    GemmCoord actualBlockShapeQK0{rowNum, stackSeqTile0, embedQK};
+                    LayoutS layOutS0(rowNum, stackSeqTile0, MLA_DECODE_KV_TILE);
+#ifdef __DAV_C220_CUBE__
+                    blockMmadQK(gQ[gmOffsetQ], gV[gmOffsetV], gS[gmOffsetBlock0], AscendC::GlobalTensor<int32_t>(),
+                                layoutQ, layoutKLatent, layOutS0, actualBlockShapeQK0, 0U, numSeg, blockSize,
+                                static_cast<uint32_t>(strideV), false, gK[gmOffsetK], 0);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
+#endif
+#ifdef __DAV_C220_VEC__
+                    LayoutP layOutP0(rowNum, stackSeqTile0, MLA_DECODE_KV_TILE);
+                    // Decode is maskless: take the 16-param generic FA4 no-mask
+                    // overload, NOT the 22-arg SWA one; MTE3_V deadlocks AIV.
+                    epilogueOnlineSoftmax(gP[gmOffsetBlock0], gS[gmOffsetBlock0], layOutP0, layOutS0,
+                                          actualBlockShapeQK0, 1U, 0U, qSBlockSize, qNBlockSize, 0U, stateSlot, qkReady,
+                                          softmaxPingPongFlag, fdMode, false, false);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
+#endif
+                }
+                for (uint32_t seg = 0; seg < numSeg; ++seg) {
+                    const bool hasNext = (seg + 1U < numSeg);
+                    const bool firstStack = (seg == 0U);
+                    const bool lastStack = (seg + 1U >= numSeg);
+                    // 前瞻段（seg+1）参数：MM1 + softmax。
+                    const uint32_t kvSStartNext = (seg + 1U) * MLA_DECODE_KV_TILE;
+                    const uint32_t stackSeqTileNext =
+                        AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal - kvSStartNext);
+                    const uint32_t slotNext = (seg + 1U) % STACK_SLOTS;
+                    const uint64_t gmOffsetBlockNext =
+                        wsSlotBase + static_cast<uint64_t>(slotNext) * WORKSPACE_BLOCK_SIZE_DB;
+                    GemmCoord actualBlockShapeQKNext{rowNum, stackSeqTileNext, embedQK};
+                    LayoutS layOutSNext(rowNum, stackSeqTileNext, MLA_DECODE_KV_TILE);
+                    // 当前段（seg）参数：MM2 + rescale。
+                    const uint32_t kvSStart = seg * MLA_DECODE_KV_TILE;
+                    const uint32_t stackSeqTile = AscendC::Std::min(MLA_DECODE_KV_TILE, kvSeqlenLocal - kvSStart);
+                    const uint32_t slot = seg % STACK_SLOTS;
+                    const uint64_t gmOffsetBlock = wsSlotBase + static_cast<uint64_t>(slot) * WORKSPACE_BLOCK_SIZE_DB;
+                    GemmCoord actualBlockShapePV{rowNum, embedV, stackSeqTile};
+
+#ifdef __DAV_C220_CUBE__
+                    if (hasNext) {
+                        blockMmadQK(gQ[gmOffsetQ], gV[gmOffsetV], gS[gmOffsetBlockNext],
+                                    AscendC::GlobalTensor<int32_t>(), layoutQ, layoutKLatent, layOutSNext,
+                                    actualBlockShapeQKNext, seg + 1U, numSeg, blockSize, static_cast<uint32_t>(strideV),
+                                    false, gK[gmOffsetK], 0);
+                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
+                    }
+                    LayoutP layoutPTemp(rowNum, stackSeqTile, MLA_DECODE_KV_TILE);
+                    blockMmadPV(gP[gmOffsetBlock], gV[gmOffsetV], gOTmp[gmOffsetBlock],
+                                AscendC::GlobalTensor<int32_t>(), layoutPTemp, layoutVTemp, layoutOTmp,
+                                actualBlockShapePV, seg, numSeg, blockSize, kvSeqlenLocal,
+                                static_cast<uint32_t>(strideV), 1U, softmaxReady, false, gV[gmOffsetV], 0);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
+#endif
+#ifdef __DAV_C220_VEC__
+                    if (hasNext) {
+                        LayoutP layOutPNext(rowNum, stackSeqTileNext, MLA_DECODE_KV_TILE);
+                        epilogueOnlineSoftmax(gP[gmOffsetBlockNext], gS[gmOffsetBlockNext], layOutPNext, layOutSNext,
+                                              actualBlockShapeQKNext, 0U, 0U, qSBlockSize, qNBlockSize, slotNext,
+                                              stateSlot, qkReady, softmaxPingPongFlag, fdMode, false, false);
+                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
+                    }
+                    epilogueRescaleO(gO[gmOffsetOHead], gOTmp[gmOffsetBlock], gOUpdate[wsUpdateBase],
+                                     gLseWrite[gmOffsetLseWrite], layoutO, layoutOTmp, layoutUpdate, layoutLse,
+                                     actualBlockShapePV, rescaleTaskPlan, pvReady, qSBlockSize, qNBlockSize, firstStack,
+                                     lastStack, slot, stateSlot, static_cast<uint32_t>(strideO),
+                                     static_cast<uint32_t>(oHeadStride), fdMode, gOFD[gmOffsetOWrite]);
+#endif
+                }
+#ifdef __DAV_C220_CUBE__
+                // P0 (G2)：本 task 段循环已结束、MTE1 已读完 Q L1 区，此时才归还 MTE1_MTE2
+                // EVENT_ID3，与 prelaunch 1 Set / drain 1 Wait 配平；消除 WAR hazard。
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
+#endif
+                // ---- 推进到下一个 task：split 内先递增 s；某 batch 的 split 用尽后重算下一
+                // 有工作 batch 并推进 lseBase/oBase（running 累加），b/s 等状态就地更新。
+                ++s;
+                if (s >= actualSplits) {
+                    lseBase += static_cast<int64_t>(actualSplits) * qHeads;
+                    oBase += static_cast<int64_t>(actualSplits) * qHeads * embedV;
+                    s = 0;
+                    bool found = false;
+                    for (uint32_t nb = b + 1U; nb < batch; ++nb) {
+                        uint32_t kvLenN = KvLenOf(nb, gActualKvseqlen, gSeqUsedKv, hasSeqUsedKv) + kvNewSeqlen;
+                        uint32_t segCountN = CeilDiv(kvLenN, MLA_DECODE_KV_TILE);
+                        if (segCountN == 0U) {
+                            continue;
+                        }
+                        b = nb;
+                        kvLenB = kvLenN;
+                        segCountB = segCountN;
+                        blocksPerSplit = CeilDiv(segCountN, nsplitPerBatch);
+                        if (blocksPerSplit == 0U) {
+                            blocksPerSplit = 1U;
+                        }
+                        actualSplits = CeilDiv(segCountN, blocksPerSplit);
+                        found = true;
+                        break;
+                    }
+                    if (!found) {
+                        break;
+                    }
                 }
             }
-        }
-        }  // ---- G1：结束 head 分块循环
+        } // ---- G1：结束 head 分块循环
 
 #ifdef __DAV_C220_CUBE__
         // D2：与 prelaunch 成对裁剪（见上），M_MTE1 4..7、MTE1_MTE2 2/7 无对应置位。
@@ -1089,9 +1085,9 @@ class MlaDecodeGemvKernel {
                                        AscendC::GlobalTensor<int32_t> gSeqUsed, bool hasSeqUsed)
     {
         if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
-            return hasSeqUsed ? static_cast<uint32_t>(gSeqUsed.GetValue(b))
-                              : static_cast<uint32_t>(gKvSeq.GetValue(b + 1)) -
-                                    static_cast<uint32_t>(gKvSeq.GetValue(b));
+            return hasSeqUsed
+                       ? static_cast<uint32_t>(gSeqUsed.GetValue(b))
+                       : static_cast<uint32_t>(gKvSeq.GetValue(b + 1)) - static_cast<uint32_t>(gKvSeq.GetValue(b));
         } else {
             return static_cast<uint32_t>(gKvSeq.GetValue(b));
         }
@@ -1159,9 +1155,8 @@ __global__ __aicore__ void MlaDecodeGemv(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k
     using KernelType =
         MlaDecodeGemvKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, INPUT_LAYOUT>;
 
-    FAIKernelParams params{q,   k,       v,   nullptr, nullptr, actualQseqlen, actualKvseqlen,
-                           o,   lse,     workspace, tiling, runtime, 0UL,     nullptr,      seqUsedKv,
-                           kvSeqlenAllocated, nullptr, qv};
+    FAIKernelParams params{q,         k,      v,       nullptr, nullptr, actualQseqlen, actualKvseqlen,    o,       lse,
+                           workspace, tiling, runtime, 0UL,     nullptr, seqUsedKv,     kvSeqlenAllocated, nullptr, qv};
     KernelType kernel;
     kernel(params);
 }

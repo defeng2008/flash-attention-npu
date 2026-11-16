@@ -1880,11 +1880,16 @@ def test_v4_mla_flash_attn_varlen_func(case):
     out_ref, _, out_pt, _ = _mla_golden(case, q, k, v, qv, scale)
 
     out = flash_attn_varlen_func(
-        q[0], k[0], v[0], qv=None if qv is None else qv[0],
+        q[0],
+        k[0],
+        v[0],
+        qv=None if qv is None else qv[0],
         cu_seqlens_q=make_cu_seqlens([sq]).npu(),
         cu_seqlens_k=make_cu_seqlens([sk]).npu(),
-        max_seqlen_q=sq, max_seqlen_k=sk,
-        softmax_scale=scale, causal=is_causal,
+        max_seqlen_q=sq,
+        max_seqlen_k=sk,
+        softmax_scale=scale,
+        causal=is_causal,
     )
     assert tuple(out.shape) == (sq, heads, dv)
     assert_fa_close(out, out_ref[0], out_pt[0], name="v4_mla_varlen_out")

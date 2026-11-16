@@ -139,9 +139,9 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
     // Stage one Q head-dim segment into columns [segStart, segStart +
     // segWidth) of the L1 zN block; keeps the parent stride for C0 landing.
     __aicore__ inline void loadQSegmentToL1(AscendC::GlobalTensor<ElementA> gSrc, uint32_t segStart, uint32_t segWidth,
-                                           uint32_t srcHeadStride, uint32_t srcTokenStride, uint32_t rowNum,
-                                           uint32_t rowNumRound, uint32_t singleGroupHeads,
-                                           LayoutAInL1 const& layoutAInL1)
+                                            uint32_t srcHeadStride, uint32_t srcTokenStride, uint32_t rowNum,
+                                            uint32_t rowNumRound, uint32_t singleGroupHeads,
+                                            LayoutAInL1 const& layoutAInL1)
     {
         LayoutAInL1 layoutSeg = layoutAInL1.GetTileLayout(MakeCoord(rowNum, segWidth));
         MatrixCoord dstCoord{0, segStart};
@@ -171,8 +171,8 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
             // rope query; both fill one 576-wide block, latent first.
             loadQSegmentToL1(gA, 0U, mlaLatentDim, qHeadStride, qTokenStride, rowNum, rowNumRound, singleGroupHeads,
                              layoutAInL1);
-            loadQSegmentToL1(mlaRopeQ, mlaLatentDim, embed - mlaLatentDim, mlaRopeQHeadStride, mlaRopeQStride,
-                             rowNum, rowNumRound, singleGroupHeads, layoutAInL1);
+            loadQSegmentToL1(mlaRopeQ, mlaLatentDim, embed - mlaLatentDim, mlaRopeQHeadStride, mlaRopeQStride, rowNum,
+                             rowNumRound, singleGroupHeads, layoutAInL1);
         } else if (singleGroupHeads == 1U) {
             LayoutA denseSrc(rowNum, embed, qTokenStride);
             copyGmToL1A(l1ATensor, gA, layoutAInL1, denseSrc);
@@ -225,8 +225,7 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
                                        uint32_t startOffset, uint32_t strideKV, uint32_t blockSize)
     {
         uint32_t blockTableId = gBlockTable.GetValue(nowNIdx);
-        kOffset = static_cast<uint64_t>(blockTableId) * pageStride +
-                  static_cast<uint64_t>(startOffset) * strideKV;
+        kOffset = static_cast<uint64_t>(blockTableId) * pageStride + static_cast<uint64_t>(startOffset) * strideKV;
     }
 
     __aicore__ inline void resetBlockStart(uint32_t kvStart, uint32_t pagedBlockSize)
@@ -449,8 +448,8 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
         }
         {
             const uint64_t gOffset = static_cast<uint64_t>(rowBase) * srcStride + dOffset;
-            auto layoutBTile = mlaAbsorbed ? LayoutB(kActual, nActual, srcStride)
-                                           : layoutB.GetTileLayout(MakeCoord(kActual, nActual));
+            auto layoutBTile =
+                mlaAbsorbed ? LayoutB(kActual, nActual, srcStride) : layoutB.GetTileLayout(MakeCoord(kActual, nActual));
             copyGmToL1B(l1BTensor[stage], src[gOffset], layoutBInL1, layoutBTile);
         }
     }
@@ -596,7 +595,7 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
             AscendC::DataCopyParams ndStoreParams(segLen, kActual / BLOCK_SIZE, 0,
                                                   strideKV / BLOCK_SIZE - kActual / BLOCK_SIZE);
             AscendC::DataCopy(appendGBCache[static_cast<uint64_t>(pageId) * pageStride +
-                                                   static_cast<uint64_t>(pageOff) * strideKV + cacheColumnOffset],
+                                            static_cast<uint64_t>(pageOff) * strideKV + cacheColumnOffset],
                               ndCopyTensor[segSrc * kActual], ndStoreParams);
             segRow += segLen;
             segSrc += segLen;

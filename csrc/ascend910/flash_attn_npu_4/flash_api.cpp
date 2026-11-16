@@ -67,7 +67,6 @@ extern __global__ __aicpu__ uint32_t WriteFARuntime(void* args);
 
 #define ACL_CHECK(expr) TORCH_CHECK((expr) == ACL_SUCCESS, #expr " failed")
 
-
 static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor& seqlensK,
                                            const std::optional<at::Tensor>& seqlensQ)
 {
@@ -203,8 +202,7 @@ std::vector<at::Tensor> mha_fwd(
                     "total_q must be positive (q must contain at least one query token)");
         int32_t cuQLast = 0;
         if (PackedCuLast(cu_seqlens_q, cuQLast)) {
-            TORCH_CHECK(q.size(0) >= cuQLast,
-                        "q has ", q.size(0), " tokens but cu_seqlens_q[-1] is ", cuQLast,
+            TORCH_CHECK(q.size(0) >= cuQLast, "q has ", q.size(0), " tokens but cu_seqlens_q[-1] is ", cuQLast,
                         "; packed T must be at least cu_seqlens_q[-1]");
         }
     }
@@ -216,9 +214,8 @@ std::vector<at::Tensor> mha_fwd(
         TORCH_CHECK(!paged_KV, "If cu_seqlens_k is passed in, then paged table is not supported");
         int32_t cuKLast = 0;
         if (PackedCuLast(cu_seqlens_k, cuKLast)) {
-            TORCH_CHECK(k.size(0) >= cuKLast && v.size(0) >= cuKLast,
-                        "k/v have ", k.size(0), "/", v.size(0), " tokens but cu_seqlens_k[-1] is ", cuKLast,
-                        "; packed T must be at least cu_seqlens_k[-1]");
+            TORCH_CHECK(k.size(0) >= cuKLast && v.size(0) >= cuKLast, "k/v have ", k.size(0), "/", v.size(0),
+                        " tokens but cu_seqlens_k[-1] is ", cuKLast, "; packed T must be at least cu_seqlens_k[-1]");
         }
     }
 
@@ -272,8 +269,8 @@ std::vector<at::Tensor> mha_fwd(
     const bool is_mla = has_q_v || (q.size(-1) != v.size(-1));
     if (is_mla) {
         TORCH_CHECK(!has_q_v || q.size(-1) <= 256, "MLA absorbed decode requires a query head dim <= 256");
-        TORCH_CHECK(head_size_v >= 1 && head_size_v <= 512,
-                    "MLA value head dimension must be in [1, 512]; got ", head_size_v);
+        TORCH_CHECK(head_size_v >= 1 && head_size_v <= 512, "MLA value head dimension must be in [1, 512]; got ",
+                    head_size_v);
     }
     if (out_.has_value()) {
         out = out_.value();
@@ -284,8 +281,7 @@ std::vector<at::Tensor> mha_fwd(
         // allocate the output as (B, S, H, dv) instead of empty_like(q) == (B,H,S,D).
         // Precede the MLA branch: an MLA BNSD q is (B,H,S,dq), so q.sizes()
         // would give wrong dv; MLA's dv is head_size_v (equal for non-MLA).
-        out = torch::empty(
-            {q.size(0), q.size(2), q.size(1), static_cast<int64_t>(head_size_v)}, q.options());
+        out = torch::empty({q.size(0), q.size(2), q.size(1), static_cast<int64_t>(head_size_v)}, q.options());
     } else if (is_mla) {
         // MLA output uses the value (latent) head dim, which differs from q's.
         // Keep q's rank/layout: BSND (B,S,H,dv) and packed TND (total,H,dv).
@@ -327,14 +323,10 @@ std::vector<at::Tensor> mha_fwd(
                     "paged key/value caches must have matching page, page-size, and head dimensions");
         const int64_t keyPageElements = k.size(1) * k.size(2) * k.size(3);
         const int64_t valuePageElements = v.size(1) * v.size(2) * v.size(3);
-        const bool keyBBND =
-            k.stride(1) == k.size(2) * k.size(3) && k.stride(2) == k.size(3) && k.stride(3) == 1;
-        const bool valueBBND =
-            v.stride(1) == v.size(2) * v.size(3) && v.stride(2) == v.size(3) && v.stride(3) == 1;
-        const bool keyBNBD =
-            k.stride(1) == k.size(3) && k.stride(2) == k.size(1) * k.size(3) && k.stride(3) == 1;
-        const bool valueBNBD =
-            v.stride(1) == v.size(3) && v.stride(2) == v.size(1) * v.size(3) && v.stride(3) == 1;
+        const bool keyBBND = k.stride(1) == k.size(2) * k.size(3) && k.stride(2) == k.size(3) && k.stride(3) == 1;
+        const bool valueBBND = v.stride(1) == v.size(2) * v.size(3) && v.stride(2) == v.size(3) && v.stride(3) == 1;
+        const bool keyBNBD = k.stride(1) == k.size(3) && k.stride(2) == k.size(1) * k.size(3) && k.stride(3) == 1;
+        const bool valueBNBD = v.stride(1) == v.size(3) && v.stride(2) == v.size(1) * v.size(3) && v.stride(3) == 1;
         TORCH_CHECK((keyBBND && valueBBND) || (keyBNBD && valueBNBD),
                     "paged key/value caches must use the same BBND or BNBD inner layout; only dimension 0 may "
                     "otherwise be non-contiguous");
@@ -409,9 +401,8 @@ std::vector<at::Tensor> mha_fwd(
         return {out, softmaxlse};
     }
 
-    const bool mlaDecodeGemvShape =
-        IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v, paged_KV, is_local,
-                             is_causal, seqlen_q);
+    const bool mlaDecodeGemvShape = IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v,
+                                                         paged_KV, is_local, is_causal, seqlen_q);
     const bool use_explicit_metadata = scheduler_metadata_.has_value() && !mlaDecodeGemvShape;
     int32_t* seqlens_q_cpu = nullptr;
     at::Tensor seqlens_q_cpu_tensor;
@@ -518,8 +509,7 @@ std::vector<at::Tensor> mha_fwd(
         const int64_t rowBlocksUpper =
             (coreNum == 0 || kvGroups == 0) ? 0 : std::min(2 * coreNum, kvGroups + coreNum - 1);
         const int64_t partialRowsUpper = fa_split::Q_TILE_CEIL * rowBlocksUpper;
-        const int64_t wsSplit =
-            partialRowsUpper * (static_cast<int64_t>(head_size_v) + 1) * sizeof(float);
+        const int64_t wsSplit = partialRowsUpper * (static_cast<int64_t>(head_size_v) + 1) * sizeof(float);
         workspace_tensor = at::empty({wsBase + wsSplit}, at::device(at::kPrivateUse1).dtype(at::kByte));
         launchBlockDim = blockDim;
 
@@ -656,8 +646,7 @@ std::vector<at::Tensor> mha_fwd(
         uint64_t splitOTotalSize = tiling_cpu_ptr->get_splitOTotalSize();
         // The gemv kernel keeps scratch tables at the workspace front; its FD
         // partials live past them; generic path keeps partials at offset 0.
-        uint64_t partialBase =
-            mlaDecodeGemvShape ? (mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize) : 0U;
+        uint64_t partialBase = mlaDecodeGemvShape ? (mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize) : 0U;
         int64_t workSpaceSize = static_cast<int64_t>(mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize +
                                                      splitLseTotalSize + splitOTotalSize);
 
@@ -930,8 +919,7 @@ std::vector<at::Tensor> mha_bwd(
         cu_seqlens_q = cu_seqlens_q_.value();
         int32_t cuQLast = 0;
         if (PackedCuLast(cu_seqlens_q, cuQLast)) {
-            TORCH_CHECK(q.size(0) >= cuQLast,
-                        "q has ", q.size(0), " tokens but cu_seqlens_q[-1] is ", cuQLast,
+            TORCH_CHECK(q.size(0) >= cuQLast, "q has ", q.size(0), " tokens but cu_seqlens_q[-1] is ", cuQLast,
                         "; packed T must be at least cu_seqlens_q[-1]");
         }
     }
@@ -939,9 +927,8 @@ std::vector<at::Tensor> mha_bwd(
         cu_seqlens_k = cu_seqlens_k_.value();
         int32_t cuKLast = 0;
         if (PackedCuLast(cu_seqlens_k, cuKLast)) {
-            TORCH_CHECK(k.size(0) >= cuKLast && v.size(0) >= cuKLast,
-                        "k/v have ", k.size(0), "/", v.size(0), " tokens but cu_seqlens_k[-1] is ", cuKLast,
-                        "; packed T must be at least cu_seqlens_k[-1]");
+            TORCH_CHECK(k.size(0) >= cuKLast && v.size(0) >= cuKLast, "k/v have ", k.size(0), "/", v.size(0),
+                        " tokens but cu_seqlens_k[-1] is ", cuKLast, "; packed T must be at least cu_seqlens_k[-1]");
         }
     }
 
@@ -1032,7 +1019,8 @@ std::vector<at::Tensor> mha_bwd(
     fagInfo.softcapValue = softcap;
     fagInfo.keepProb = 1.0f;
     bool is_local = false;
-    NormalizeAttentionWindow(is_causal, max_seqlen_q, max_seqlen_k, window_size_left, window_size_right, is_causal, is_local);
+    NormalizeAttentionWindow(is_causal, max_seqlen_q, max_seqlen_k, window_size_left, window_size_right, is_causal,
+                             is_local);
     const bool has_attn_mask = is_causal || is_local;
     if (is_causal) {
         fagInfo.maskType = static_cast<int32_t>(FAGTiling::MaskType::MASK_CAUSUAL);

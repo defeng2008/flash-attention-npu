@@ -92,17 +92,9 @@ def _paged_kv_inner_layout(x):
     if x is None or x.dim() != 4:
         return None
     page_size, num_heads, head_dim = x.shape[1:]
-    if (
-        x.stride(1) == num_heads * head_dim
-        and x.stride(2) == head_dim
-        and x.stride(3) == 1
-    ):
+    if x.stride(1) == num_heads * head_dim and x.stride(2) == head_dim and x.stride(3) == 1:
         return "BBND"
-    if (
-        x.stride(1) == head_dim
-        and x.stride(2) == page_size * head_dim
-        and x.stride(3) == 1
-    ):
+    if x.stride(1) == head_dim and x.stride(2) == page_size * head_dim and x.stride(3) == 1:
         return "BNBD"
     return None
 
@@ -1536,8 +1528,7 @@ def flash_attn_with_kvcache(
         if out_transposed:
             if k is not None or v is not None:
                 raise NotImplementedError(
-                    "flash_attn_npu_3: 910 backend BNSD layout does not support "
-                    "append-KV (k/v)"
+                    "flash_attn_npu_3: 910 backend BNSD layout does not support append-KV (k/v)"
                 )
             if cache_seqlens is not None:
                 max_seqlen_k_bound = int(cache_seqlens.max().item())
