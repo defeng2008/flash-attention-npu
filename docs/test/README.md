@@ -61,6 +61,8 @@ export TMPDIR=/home/w00811046/tmp
 | `double_benchmark` | GPU(daoailab) + CPU 双标杆 | `nodes_accuracy_gpu.yaml` | `--task accuracy --bm_device cpu`（多进程） |
 | `gpu_mem_compare` | GPU 峰值显存 | `nodes_memory_gpu.yaml` | `--task memory_device --bm_device gpu`（多进程） |
 
+> `double_benchmark` / `gpu_mem_compare` 的 `nodes_*.yaml` 里带一个**远端 GPU 节点**，出货是占位 IP，跑之前必须先配置 GPU 主机 IP 并在该主机上起 atk server，见 2.7 节。
+
 ### 2.2 接口与 paged 变体
 
 每个套件默认覆盖 5 个接口：`fa3_func` / `fa3_varlen` / `fa3_kvcache` / `fa4_func` / `fa4_varlen`。
@@ -190,6 +192,52 @@ atk task -c ../../../single_benchmark_cann/cases/user_scenarios_fa3_func.json \
 | `double_benchmark` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
 | `gpu_mem_compare` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
 | **合计** | | | **2130** |
+
+### 2.7 GPU 标杆主机配置（`double_benchmark` / `gpu_mem_compare`）
+
+这两个套件比 `nodes_accuracy.yaml` 多一个**远端 GPU 节点**（daoailab 的 Hopper 实现），出货时是占位 IP：
+
+| 套件 | 节点文件（每个接口目录一份） | 占位内容 |
+|---|---|---|
+| `double_benchmark` | `interfaces/<iface>/nodes_accuracy_gpu.yaml` | `host: 192.168.0.100  # TODO: 改为 GPU 主机 IP` |
+| `gpu_mem_compare` | `interfaces/<iface>/nodes_memory_gpu.yaml` | 同上（`task: [memory_device]`） |
+
+```yaml
+nodes:
+  - backend: npu
+    devices: [0]
+    task: [accuracy]
+  - backend: cpu
+    task: [accuracy]
+  - backend: gpu
+    host: 192.168.0.100   # ← 改成 GPU 主机 IP（必填）
+    port: 9090            # ← 与 GPU 主机上 atk server 的端口一致
+    devices: [0]          # ← GPU 卡号
+    task: [accuracy]      # 显存套件为 [memory_device]
+```
+
+配置三步：
+
+1. **改 IP**：把 5 个接口目录下的 `nodes_accuracy_gpu.yaml` / `nodes_memory_gpu.yaml` 的 `host` 改成 GPU 主机 IP（`devices` 按需改成 GPU 卡号，多卡写 `[0,1]`）。
+   - ATK 里 `host` 默认值是 `127.0.0.1`，与本地节点同源判定，**不能填 `127.0.0.1` / `localhost`**，否则会在 NPU 机上用 `torch.cuda` 跑 GPU 标杆，必然失败。
+   - `host` / `port` / `devices` 是**每个接口目录各存一份**，只改 `fa3_func` 就只对 `fa3_func` 生效。
+
+2. **在 GPU 主机上常驻 atk server**：`atk task` 是以 HTTP + celery 队列连到该 `host:port` 的，GPU 主机必须先起服务，并挂上同一份接口插件（GPU 侧 worker 才能执行 `execute_*.py` 的 `_gpu` 分支）：
+
+```bash
+# 在 GPU 主机上执行（注意：server 的 -p 是【端口】，插件路径用 --plugin_path）
+cd docs/test/atk/double_benchmark/interfaces/fa3_func
+atk server -h 0.0.0.0 -p 9090 --devices 0 --plugin_path .
+
+# 想让一个 server 覆盖该套件全部接口，把插件路径指到套件目录即可：
+# --plugin_path ../..        # = double_benchmark/
+```
+
+3. **GPU 主机依赖**：该机上要有 atk 运行环境（含 `torch` + GPU 版框架）与 daoailab 仓库 —— `execute_*.py` 的 `_gpu()` 从 `DAOAI_ROOT` 目录导入 `hopper.flash_attn_interface`，`DAOAI_ROOT` 默认 `/home/w00811046/code/mla/daoailab`，可用环境变量覆盖。
+
+> `atk server` 的 `-p` 是**端口**，而 `atk task` 的 `-p` 是**插件路径**（`--plugin_path`），两者不是同一个参数；IP 不通或 GPU 侧 server 未启动时，任务会在连接该节点时失败（拒绝/超时）。
+>
+> 占位值由 `atk/tools/gen_atk_mla.py` 的 `NODES` 模板写出，**重跑生成器会把 IP 覆盖回 `192.168.0.100`**；要长期固化请直接改生成器模板里的 `host`。
 
 ---
 
