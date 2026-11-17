@@ -14,6 +14,7 @@ match the unabsorbed output. An independent FP64 CPU golden validates each path.
 """
 
 import importlib
+import sys
 
 import pytest
 import torch
@@ -21,6 +22,16 @@ import torch_npu
 
 DEVICE = "npu"
 DTYPE = torch.bfloat16
+
+DTYPES = [torch.bfloat16, torch.float16]
+
+
+@pytest.fixture(autouse=True, params=DTYPES, ids=["bf16", "fp16"])
+def _precision(request, monkeypatch):
+    """Run every case once per supported precision."""
+    monkeypatch.setattr(sys.modules[__name__], "DTYPE", request.param)
+    yield request.param
+
 
 # bf16 relative-L2 acceptance threshold (see the MLA spec).
 REL_L2_TOL = 5e-3

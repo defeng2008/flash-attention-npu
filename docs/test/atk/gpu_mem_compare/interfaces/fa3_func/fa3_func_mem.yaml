@@ -24,8 +24,9 @@ api_type: fa3_func_mla_mem
 version: v2.1
 generate: fa3_func_mla_constraints
 
-# 用例条数：本文件所有输入都只有 1 个 dtype，所以总条数 = dtype_numbers = 100
-dtype_numbers: 100
+# 用例条数：精度张量有 bf16/fp16 两种 dtype，同一形状下每种 dtype 各生成一条，
+# 所以总条数 = max(各输入的 dtype 个数) × dtype_numbers = 2 × 25 = 50
+dtype_numbers: 25
 # 关掉边界/空 tensor 用例：q.shape 为空时钩子无法判断 prefill/decode
 extra_numbers: 0
 outputs: 1
@@ -48,7 +49,7 @@ inputs:
   - name: q
     type: tensor
     required: false
-    dtypes: {values: [bf16]}
+    dtypes: {values: [bf16, fp16]}
     shapes:
       dim_numbers: {values: [4]}
       dim_values:
@@ -63,7 +64,7 @@ inputs:
   - name: k
     type: tensor
     required: false
-    dtypes: {values: [bf16]}
+    dtypes: {values: [bf16, fp16]}
     shapes:
       dim_numbers: {values: [4]}
       dim_values:
@@ -78,7 +79,7 @@ inputs:
   - name: v
     type: tensor
     required: false
-    dtypes: {values: [bf16]}
+    dtypes: {values: [bf16, fp16]}
     shapes:
       dim_numbers: {values: [4]}
       dim_values:
@@ -93,7 +94,7 @@ inputs:
   - name: qv
     type: tensor
     required: false
-    dtypes: {values: [bf16]}
+    dtypes: {values: [bf16, fp16]}
     shapes:
       dim_numbers: {values: [4]}
       dim_values:

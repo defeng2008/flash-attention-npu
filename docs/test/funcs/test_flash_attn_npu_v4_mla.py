@@ -15,6 +15,8 @@ as the non-contiguous ``transpose(1, 2)`` view; the output then keeps the caller
 ``(B, S, H, dv)`` view shape.
 """
 
+import sys
+
 import torch
 import torch_npu
 import pytest
@@ -26,6 +28,16 @@ from flash_attn_npu_4 import (
 
 DEVICE = "npu"
 DTYPE = torch.bfloat16
+
+DTYPES = [torch.bfloat16, torch.float16]
+
+
+@pytest.fixture(autouse=True, params=DTYPES, ids=["bf16", "fp16"])
+def _precision(request, monkeypatch):
+    """Run every case once per supported precision."""
+    monkeypatch.setattr(sys.modules[__name__], "DTYPE", request.param)
+    yield request.param
+
 
 # bf16 relative-L2 acceptance threshold (see the MLA spec).
 REL_L2_TOL = 5e-3

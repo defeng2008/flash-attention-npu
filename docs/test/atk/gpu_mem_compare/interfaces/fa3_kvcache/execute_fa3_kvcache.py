@@ -56,17 +56,31 @@ class Fa3KvcacheMem(BaseApi):
         call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))
 
+    def _case_dtype(self):
+        """用例配置里精度张量（q）的 dtype（bf16/fp16），默认 bf16。
+
+        ATK 标杆路径会把 bf16/fp16 输入都升精度到 fp32（见 InputDataset.get_benchmark_data），
+        单看张量 dtype 已无法区分用例原本是 bf16 还是 fp16，必须回到 case_config 读取。
+        """
+        inputs = getattr(getattr(self.task_result, "case_config", None), "inputs", None) or []
+        for entry in inputs:
+            if not isinstance(entry, list) and getattr(entry, "name", None) == "q":
+                name = str(getattr(entry, "dtype", "")).lower()
+                return {"fp16": torch.float16, "bf16": torch.bfloat16}.get(name, torch.bfloat16)
+        return torch.bfloat16
+
     def _fia(self, kw):
         """CANN npu_fused_infer_attention_score 标杆（映射对齐 tests/perf/bench_mla_vs_fia.py）。"""
         import torch_npu
         fia = torch_npu.npu_fused_infer_attention_score
         dev = f"npu:{self.device_id}"
+        target_dtype = self._case_dtype()
 
         def _dt(t):
-            # 标杆路径下 ATK 会把 bf16/fp16 输入升精度到 fp32，而 aclnnFusedInferAttentionScore
-            # 的 MLA 分支只支持 bf16/fp16，这里按需回落到 bf16。
+            # 标杆路径下 ATK 会把 bf16/fp16 输入都升精度到 fp32，而 aclnnFusedInferAttentionScore
+            # 的 MLA 分支只支持 bf16/fp16，这里按用例配置的精度回落（bf16 用例->bf16，fp16 用例->fp16）。
             if isinstance(t, torch.Tensor) and t.dtype in (torch.float32, torch.float64):
-                return t.to(torch.bfloat16)
+                return t.to(target_dtype)
             return t
 
         q = _dt(kw["q"])

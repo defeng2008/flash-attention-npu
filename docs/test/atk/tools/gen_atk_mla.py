@@ -25,6 +25,9 @@ ROOT = Path("/home/w00811046/code/fan/mlatest/flash-attention-npu/docs/test/atk"
 SCALE = 192 ** -0.5          # DeepSeek MLA softmax scale
 BLOCK = 128                  # paged KV block size
 BF16 = "bf16"
+# MLA 精度张量（q/k/v/qv/k_cache/v_cache）覆盖的精度；yaml 里渲染成 dtypes.values，
+# ATK 会为每个 dtype 各生成一条用例（索引/attr 输入不在此列，保持落单一 dtype）。
+PRECISIONS = ["bf16", "fp16"]
 
 IFACES = {
     "fa3_func": dict(pkg="flash_attn_npu_3", fn="flash_attn_func", gpu="fa3", layout="bsnd",
@@ -41,18 +44,21 @@ IFACES = {
 IFACE_ORDER = ["fa3_func", "fa3_varlen", "fa3_kvcache", "fa4_func", "fa4_varlen"]
 
 # category -> (kind, nodes file, run file, bm_device, task, multi, 说明)
+# dtype_numbers 决定每个 dtype 生成多少条用例，总条数 = dtype 个数 × dtype_numbers；
+# 只有 CANN 标杆保留每接口 200 条（2 个 dtype × 100）；
+# CPU/GPU 标杆（cpu / gpu）跑得慢，统一压到每接口 50 条（2 个 dtype × 25）。
 CATEGORIES = {
     "double_benchmark": dict(kind="acc", nodes="nodes_accuracy_gpu.yaml", run="run_accuracy.sh",
-                             bm="cpu", task="accuracy", multi=True,
+                             bm="cpu", task="accuracy", multi=True, dtype_numbers=25,
                              desc="npu 候选 vs GPU(daoailab) + CPU 双标杆精度对比"),
     "single_benchmark_cpu": dict(kind="acc", nodes="nodes_accuracy.yaml", run="run_accuracy.sh",
-                                 bm="cpu", task="accuracy", multi=False,
+                                 bm="cpu", task="accuracy", multi=False, dtype_numbers=25,
                                  desc="npu 候选 vs CPU fp32 标杆精度对比"),
     "single_benchmark_cann": dict(kind="acc", nodes="nodes_accuracy_cann.yaml", run="run_accuracy.sh",
-                                  bm="npu", task="accuracy", multi=False,
+                                  bm="npu", task="accuracy", multi=False, dtype_numbers=100,
                                   desc="npu 候选 vs CANN npu_fused_infer_attention_score 标杆精度对比"),
     "gpu_mem_compare": dict(kind="mem", nodes="nodes_memory_gpu.yaml", run="run_memory.sh",
-                            bm="gpu", task="memory_device", multi=True,
+                            bm="gpu", task="memory_device", multi=True, dtype_numbers=25,
                             desc="npu(FA3/FA4) vs GPU(daoailab) 峰值显存对比（需要 GPU 主机）"),
 }
 CAT_ORDER = ["double_benchmark", "single_benchmark_cpu", "single_benchmark_cann", "gpu_mem_compare"]
@@ -288,17 +294,31 @@ class @@CLS@@(BaseApi):
         call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))
 
+    def _case_dtype(self):
+        """用例配置里精度张量（q）的 dtype（bf16/fp16），默认 bf16。
+
+        ATK 标杆路径会把 bf16/fp16 输入都升精度到 fp32（见 InputDataset.get_benchmark_data），
+        单看张量 dtype 已无法区分用例原本是 bf16 还是 fp16，必须回到 case_config 读取。
+        """
+        inputs = getattr(getattr(self.task_result, "case_config", None), "inputs", None) or []
+        for entry in inputs:
+            if not isinstance(entry, list) and getattr(entry, "name", None) == "q":
+                name = str(getattr(entry, "dtype", "")).lower()
+                return {"fp16": torch.float16, "bf16": torch.bfloat16}.get(name, torch.bfloat16)
+        return torch.bfloat16
+
     def _fia(self, kw):
         """CANN npu_fused_infer_attention_score 标杆（映射对齐 tests/perf/bench_mla_vs_fia.py）。"""
         import torch_npu
         fia = torch_npu.npu_fused_infer_attention_score
         dev = f"npu:{self.device_id}"
+        target_dtype = self._case_dtype()
 
         def _dt(t):
-            # 标杆路径下 ATK 会把 bf16/fp16 输入升精度到 fp32，而 aclnnFusedInferAttentionScore
-            # 的 MLA 分支只支持 bf16/fp16，这里按需回落到 bf16。
+            # 标杆路径下 ATK 会把 bf16/fp16 输入都升精度到 fp32，而 aclnnFusedInferAttentionScore
+            # 的 MLA 分支只支持 bf16/fp16，这里按用例配置的精度回落（bf16 用例->bf16，fp16 用例->fp16）。
             if isinstance(t, torch.Tensor) and t.dtype in (torch.float32, torch.float64):
-                return t.to(torch.bfloat16)
+                return t.to(target_dtype)
             return t
 
         q = _dt(kw["q"])
@@ -321,11 +341,14 @@ class @@CLS@@(BaseApi):
                            actual_seq_lengths=cu_q.tolist(), actual_seq_lengths_kv=cu_k.tolist(),
                            num_heads=q.shape[1], scale=scale, input_layout="TND",
                            num_key_value_heads=k.shape[1], sparse_mode=3 if causal else 0)[0]
+            mask = None
+            if causal:
+                mask = torch.triu(torch.ones(2048, 2048), diagonal=1).bool().to(dev)
             return fia(qv.to(dev), v.to(dev), v.to(dev),        # TND decode (absorbed)
-                       query_rope=q.to(dev), key_rope=k.to(dev),
+                       atten_mask=mask, query_rope=q.to(dev), key_rope=k.to(dev),
                        actual_seq_lengths=cu_q.tolist(), actual_seq_lengths_kv=cu_k.tolist(),
                        num_heads=qv.shape[1], scale=scale, input_layout="TND",
-                       num_key_value_heads=v.shape[1], sparse_mode=0)[0]
+                       num_key_value_heads=v.shape[1], sparse_mode=3 if causal else 0)[0]
         if qv is None:                              # BSND prefill
             half, rope = q.shape[-1] - 64, 64
             q_nope, q_rope = q[..., :half].contiguous().to(dev), q[..., half:].contiguous().to(dev)
@@ -337,10 +360,14 @@ class @@CLS@@(BaseApi):
                        query_rope=q_rope, key_rope=k_rope, num_heads=q.shape[2], scale=scale,
                        input_layout="BSND", num_key_value_heads=k.shape[2],
                        sparse_mode=3 if causal else 0)[0]
+        mask = None
+        if causal:
+            mask = torch.triu(torch.ones(2048, 2048), diagonal=1).bool().to(dev)
         return fia(qv.to(dev), v.to(dev), v.to(dev),           # BSND decode (absorbed)
-                   query_rope=q.to(dev), key_rope=k.to(dev), num_heads=qv.shape[2], scale=scale,
+                   atten_mask=mask, query_rope=q.to(dev), key_rope=k.to(dev),
+                   num_heads=qv.shape[2], scale=scale,
                    input_layout="BSND", num_key_value_heads=v.shape[2],
-                   sparse_mode=0)[0]
+                   sparse_mode=3 if causal else 0)[0]
 '''
 
 
@@ -504,7 +531,7 @@ def _blocks(batch, nblk):
     return [[b * nblk + i for i in range(nblk)] for b in range(batch)]
 
 
-def build_inputs(iface, spec):
+def build_inputs(iface, spec, precision=BF16):
     meta = IFACES[iface]
     form = spec["form"]
     B, Sq = spec["B"], spec["Sq"]
@@ -527,16 +554,16 @@ def build_inputs(iface, spec):
         cache_len = Sk
         if paged:
             nblk = (cache_len + BLOCK - 1) // BLOCK
-            inputs.append(_tensor("q", BF16, (B, Sq, Hq, Dq)))
-            inputs.append(_tensor("k_cache", BF16, (B * nblk, BLOCK, Hk, Dk)))
-            inputs.append(_tensor("v_cache", BF16, (B * nblk, BLOCK, Hk, Dv)))
+            inputs.append(_tensor("q", precision, (B, Sq, Hq, Dq)))
+            inputs.append(_tensor("k_cache", precision, (B * nblk, BLOCK, Hk, Dk)))
+            inputs.append(_tensor("v_cache", precision, (B * nblk, BLOCK, Hk, Dv)))
             inputs.append(_tensor("page_table", "int32", (B, nblk), values=_blocks(B, nblk)))
         else:
-            inputs.append(_tensor("q", BF16, (B, Sq, Hq, Dq)))
-            inputs.append(_tensor("k_cache", BF16, (B, cache_len, Hk, Dk)))
-            inputs.append(_tensor("v_cache", BF16, (B, cache_len, Hk, Dv)))
+            inputs.append(_tensor("q", precision, (B, Sq, Hq, Dq)))
+            inputs.append(_tensor("k_cache", precision, (B, cache_len, Hk, Dk)))
+            inputs.append(_tensor("v_cache", precision, (B, cache_len, Hk, Dv)))
         if qv is not None:
-            inputs.append(_tensor("qv", BF16, (B, Sq, Hq, Dv)))
+            inputs.append(_tensor("qv", precision, (B, Sq, Hq, Dv)))
         inputs.append(_attr("cache_seqlens", "int", cache_len))
         inputs.append(_attr("softmax_scale", "float", SCALE))
         inputs.append(_attr("causal", "bool", causal))
@@ -547,15 +574,15 @@ def build_inputs(iface, spec):
         Tq = B * Sq
         Tk = B * Sk
         cu_q, cu_k = _seq([Sq] * B), _seq([Sk] * B)
-        inputs.append(_tensor("q", BF16, (Tq, Hq, Dq)))
-        inputs.append(_tensor("k", BF16, (Tk, Hk, Dk)))
-        inputs.append(_tensor("v", BF16, (Tk, Hk, Dv)))
+        inputs.append(_tensor("q", precision, (Tq, Hq, Dq)))
+        inputs.append(_tensor("k", precision, (Tk, Hk, Dk)))
+        inputs.append(_tensor("v", precision, (Tk, Hk, Dv)))
         if qv is not None:
-            inputs.append(_tensor("qv", BF16, (Tq, Hq, Dv)))
+            inputs.append(_tensor("qv", precision, (Tq, Hq, Dv)))
         if paged:
             nblk = (Sk + BLOCK - 1) // BLOCK
-            inputs[1] = _tensor("k", BF16, (B * nblk, BLOCK, Hk, Dk))
-            inputs[2] = _tensor("v", BF16, (B * nblk, BLOCK, Hk, Dv))
+            inputs[1] = _tensor("k", precision, (B * nblk, BLOCK, Hk, Dk))
+            inputs[2] = _tensor("v", precision, (B * nblk, BLOCK, Hk, Dv))
             inputs.append(_tensor("page_table", "int32", (B, nblk), values=_blocks(B, nblk)))
             inputs.append(_tensor("seqused_k", "int32", (B,), values=[Sk] * B))
         inputs.append(_tensor("cu_seqlens_q", "int32", (B + 1,), values=cu_q))
@@ -571,11 +598,11 @@ def build_inputs(iface, spec):
         return inputs
 
     # BSND plain (fa3_func / fa4_func)
-    inputs.append(_tensor("q", BF16, (B, Sq, Hq, Dq)))
-    inputs.append(_tensor("k", BF16, (B, Sk, Hk, Dk)))
-    inputs.append(_tensor("v", BF16, (B, Sk, Hk, Dv)))
+    inputs.append(_tensor("q", precision, (B, Sq, Hq, Dq)))
+    inputs.append(_tensor("k", precision, (B, Sk, Hk, Dk)))
+    inputs.append(_tensor("v", precision, (B, Sk, Hk, Dv)))
     if qv is not None:
-        inputs.append(_tensor("qv", BF16, (B, Sq, Hq, Dv)))
+        inputs.append(_tensor("qv", precision, (B, Sq, Hq, Dv)))
     inputs.append(_attr("softmax_scale", "float", SCALE))
     inputs.append(_attr("causal", "bool", causal))
     inputs.append(_attr_tuple("window_size", window))
@@ -593,26 +620,28 @@ def build_user_scenarios(iface, cat):
         ("prefill", 1, 198, 198, True, (-1, -1), False, "user_prefill_198"),
         ("decode", 1, 1, 1025, False, (-1, -1), False, "user_decode_1025"),
     ]
+    # 每条业务 shape 各出 bf16 / fp16 两个精度，与生成用例的精度覆盖保持一致。
     cases = []
-    for i, (form, B, Sq, Sk, causal, window, paged, label) in enumerate(rows):
-        cases.append({
-            "id": i, "default_seed": None, "name": f"{meta['pkg']}.{meta['fn']}",
-            "aclnn_name": None, "triton_name": None, "kernel_name": None, "version": "v2.1",
-            "expected_error_msg": None, "api": "pytorch", "api_type": api_type,
-            "aclnn_api_type": "aclnn_function", "triton_api_type": "triton_function",
-            "fusion_api_type": "fusion_function", "fusion_mode": None,
-            "dist_api_type": "dist_function", "kernel_api_type": "kernel_function",
-            "backward": False, "memo": label,
-            "standard": {"acc": {"cv_fused_double_benchmark": {
-                "max_re_ratio": 2.0, "avg_re_ratio": 1.2, "root_mean_squared_ratio": 1.2}},
-                "perf": "not_key", "mem": 1.1},
-            "outputs": 1,
-            "inputs": build_inputs(iface, dict(form=form, B=B, Sq=Sq, Sk=Sk, causal=causal,
-                                              window=window, paged=paged)),
-            "acl_json": "", "method_inputs": None, "tensor_input": None, "compute_times": None,
-            "save_name": None, "uuid": None, "downloaded": False, "is_boundary": False,
-            "xrun_cs_name": None, "xrun_data": None, "strategy": None,
-        })
+    for form, B, Sq, Sk, causal, window, paged, label in rows:
+        for precision in PRECISIONS:
+            cases.append({
+                "id": len(cases), "default_seed": None, "name": f"{meta['pkg']}.{meta['fn']}",
+                "aclnn_name": None, "triton_name": None, "kernel_name": None, "version": "v2.1",
+                "expected_error_msg": None, "api": "pytorch", "api_type": api_type,
+                "aclnn_api_type": "aclnn_function", "triton_api_type": "triton_function",
+                "fusion_api_type": "fusion_function", "fusion_mode": None,
+                "dist_api_type": "dist_function", "kernel_api_type": "kernel_function",
+                "backward": False, "memo": f"{label}_{precision}",
+                "standard": {"acc": {"cv_fused_double_benchmark": {
+                    "max_re_ratio": 2.0, "avg_re_ratio": 1.2, "root_mean_squared_ratio": 1.2}},
+                    "perf": "not_key", "mem": 1.1},
+                "outputs": 1,
+                "inputs": build_inputs(iface, dict(form=form, B=B, Sq=Sq, Sk=Sk, causal=causal,
+                                                  window=window, paged=paged), precision=precision),
+                "acl_json": "", "method_inputs": None, "tensor_input": None, "compute_times": None,
+                "save_name": None, "uuid": None, "downloaded": False, "is_boundary": False,
+                "xrun_cs_name": None, "xrun_data": None, "strategy": None,
+            })
     return cases
 
 
@@ -634,10 +663,14 @@ _K_PAGED = [[1, 2], [BLOCK], [1, 32], [64, 192]]
 _V_PAGED = [[1, 2], [BLOCK], [1, 32], [128, 512]]
 
 
-def _in_tensor(name, dims, comment=None):
-    """rank = len(dims) 的 bf16 张量输入；dims 是每一维的候选取值。"""
+def _in_tensor(name, dims, comment=None, dtypes=PRECISIONS):
+    """rank = len(dims) 的精度张量输入；dims 是每一维的候选取值。
+
+    dtypes 默认给出 MLA 支持的全部精度（bf16/fp16），ATK 会为每个 dtype 各生成一条用例。
+    """
+    dtype_values = ", ".join(dtypes)
     lines = [f"  - name: {name}", "    type: tensor", "    required: false",
-             "    dtypes: {values: [bf16]}", "    shapes:",
+             f"    dtypes: {{values: [{dtype_values}]}}", "    shapes:",
              f"      dim_numbers: {{values: [{len(dims)}]}}", "      dim_values:"]
     lines += [f"        - values: [{', '.join(str(v) for v in vs)}]" for vs in dims]
     lines += ["    ranges:", "      valid:", "        values: [[-5.0, 5.0]]"]
@@ -729,6 +762,7 @@ def build_yaml(iface, cat, paged=False):
     meta = IFACES[iface]
     cfg = CATEGORIES[cat]
     stem = stem_of(iface, cat, paged)
+    dn = cfg.get("dtype_numbers", 100)
     api_type = f"{iface}_mla_{'mem' if cfg['kind'] == 'mem' else 'accuracy'}"
     paired = "" if cat != "single_benchmark_cann" else "（该类别不出 paged 变体：标杆 FIA 没有 page_table 入参）"
     # 形状注释按接口形态/是否 paged 变化，避免给测试同事看时出现无关内容
@@ -772,8 +806,9 @@ def build_yaml(iface, cat, paged=False):
         "version: v2.1",
         f"generate: {iface}_mla_constraints",
         "",
-        "# 用例条数：本文件所有输入都只有 1 个 dtype，所以总条数 = dtype_numbers = 100",
-        "dtype_numbers: 100",
+        "# 用例条数：精度张量有 bf16/fp16 两种 dtype，同一形状下每种 dtype 各生成一条，",
+        f"# 所以总条数 = max(各输入的 dtype 个数) × dtype_numbers = 2 × {dn} = {2 * dn}",
+        f"dtype_numbers: {dn}",
         "# 关掉边界/空 tensor 用例：q.shape 为空时钩子无法判断 prefill/decode",
         "extra_numbers: 0",
         "outputs: 1",

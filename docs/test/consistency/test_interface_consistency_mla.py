@@ -20,6 +20,7 @@ plus a ``heads_q = 128`` variant of each scenario.
 """
 
 import importlib
+import sys
 
 import pytest
 import torch
@@ -27,6 +28,16 @@ import torch_npu  # noqa: F401  (registers the npu device)
 
 DTYPE = torch.bfloat16
 DEVICE = "npu"
+
+DTYPES = [torch.bfloat16, torch.float16]
+
+
+@pytest.fixture(autouse=True, params=DTYPES, ids=["bf16", "fp16"])
+def _precision(request, monkeypatch):
+    """Run every case once per supported precision."""
+    monkeypatch.setattr(sys.modules[__name__], "DTYPE", request.param)
+    yield request.param
+
 
 # form -> (sq, skv, heads_q, heads_kv, head_dim_q, head_dim_v, causal)
 FORMS = {

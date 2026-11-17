@@ -57,6 +57,11 @@ class Fa3VarlenConstraints(CaseGenerator):
         q = ins["q"]
         decode = q.shape[-1] == ROPE        # 形态判据：q 末维
         bsnd = len(q.shape) == 4
+        # dtype 对齐：q/k/v(/qv/k_cache/v_cache) 必须同精度。ATK 只按 dtype_numbers 决定 q
+        # 的精度，其余张量独立随机，会出成 q=fp16、v=bf16 这类非法组合；这里统一跟随 q。
+        for entry in case_config.inputs:
+            if not isinstance(entry, list) and getattr(entry, "dtype", None) in ("bf16", "fp16"):
+                entry.dtype = q.dtype
         qv_entry = ins.get("qv") if decode else None
         if not decode:
             _drop(case_config, "qv")        # qv 只在吸收态出现
@@ -78,9 +83,9 @@ class Fa3VarlenConstraints(CaseGenerator):
 
         # ---- KV（普通 / paged）--------------------------------------------------
         # 非 paged：k 的 seq 维就是 KV 长度；paged：页数取自 page_table 的第 1 维。
-        # 硬约束：KV 长度必须 >= Q 长度。causal / 滑窗掩码在 KV<Q（或窗口过窄）时会把
-        # 尾部整行 mask 掉，而这类行在真实 MLA 场景并不存在；softmax 对全 -inf 行无
-        # 定义，候选与参考必然对不上（实测 fa3_func 21/100 失败全部由此导致）。
+        # 硬约束：KV 长度必须 >= Q 长度。causal / 滑窗掩码在 KV<Q（或窗口过窄）时会
+        # 把尾部整行 mask 掉，而这些行在真实 MLA 场景并不存在；softmax 对全 -inf
+        # 行的取值无定义，候选与参考必然对不上（实测 21/100 失败全部由此导致）。
         q_len = seq_q if bsnd else total_q
         k_entry = ins["k_cache"] if "k_cache" in ins else ins["k"]
         v_entry = ins["v_cache"] if "v_cache" in ins else ins["v"]

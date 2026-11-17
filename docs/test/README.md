@@ -4,9 +4,9 @@
 
 | 子目录 | 定位 | 判定依据 | 用例数 |
 |---|---|---|---|
-| [`atk/`](atk) | ATK 平台的精度 / 显存比对，4 个套件 | 精度阈值（`re_ratio`）、显存比 | **2640** |
-| [`funcs/`](funcs) | pytest 功能正确性（MLA 专项）| 与 CPU golden 的 rel-L2 | **58** |
-| [`consistency/`](consistency) | pytest 接口间**二进制一致性** | `torch.equal`（严格逐位） | **8** |
+| [`atk/`](atk) | ATK 平台的精度 / 显存比对，4 个套件 | 精度阈值（`re_ratio`）、显存比 | **2130** |
+| [`funcs/`](funcs) | pytest 功能正确性（MLA 专项）| 与 CPU golden 的 rel-L2 | **116** |
+| [`consistency/`](consistency) | pytest 接口间**二进制一致性** | `torch.equal`（严格逐位） | **16** |
 | [`perf/`](perf) | FA 与 CANN FIA 的**内核耗时**对比 | `candidate / FIA <= 1.05` | **14** 次测量 / **10** 条门限 |
 
 ```mermaid
@@ -50,7 +50,7 @@ export TMPDIR=/home/w00811046/tmp
 
 ---
 
-## 2. atk/ — ATK 平台用例（2640 条）
+## 2. atk/ — ATK 平台用例（2130 条）
 
 ### 2.1 四个套件与对比基准
 
@@ -82,7 +82,7 @@ api: pytorch
 api_type: fa3_func_mla_accuracy
 version: v2.1
 generate: fa3_func_mla_constraints       # 用例生成约束钩子
-dtype_numbers: 100                       # ← 生成 100 条用例
+dtype_numbers: 100                       # ← 每个 dtype 生成 100 条；2 个 dtype ⇒ 200 条（仅 CANN 套件；CPU/GPU 标杆套件为 25 ⇒ 50 条）
 outputs: 1
 standard:
   acc:
@@ -97,7 +97,7 @@ inputs:
   - name: q
     type: tensor
     required: true
-    dtypes: {values: [bf16]}
+    dtypes: {values: [bf16, fp16]}
     shapes:
       dim_numbers: {values: [4]}
       dim_values:                        # ← 每一维的候选取值池
@@ -111,12 +111,12 @@ inputs:
 
 | 维度 | 取值 | 说明 |
 |---|---|---|
-| dtype | `bf16` | 当前 MLA 用例只跑 bf16 |
+| dtype | `bf16`、`fp16` | 精度张量（q/k/v/qv/k_cache/v_cache）按两种精度各生成一条；索引/attr 输入不受影响 |
 | 张量形状 | `dim_values` 逐维候选池 | ATK **逐维独立随机**取样（非笛卡尔积） |
 | 数值范围 | `ranges.valid.values` = `[-5.0, 5.0]` | 随机数分布区间 |
 | 属性 | `causal`、`softmax_scale`、`window_size`、`cache_seqlens`、`max_seqlen_q/k` | attr / attr_tuple |
 | 索引张量 | `cu_seqlens_q/k`、`page_table`、`seqused_k`（`int32`，`max_length: 4096`） | 真实取值由钩子写死 |
-| 用例条数 | `dtype_numbers: 100` | 本用例所有输入只有 1 个 dtype ⇒ **总条数 = 100** |
+| 用例条数 | `dtype_numbers: 100`（CANN）/ `25`（CPU、GPU 标杆） | 总条数 = `max(各输入的 dtype 个数) × dtype_numbers`；CANN 套件 2 × 100 = **200**，CPU / 双标杆 / 显存三套件 2 × 25 = **50**（bf16 / fp16 各半） |
 
 **跨输入的 MLA 契约**由 `interfaces/<iface>/generate_<iface>.py` 里的 `after_case_config` 钩子统一改写（这是保证用例合法性的关键）：
 
@@ -127,13 +127,13 @@ inputs:
 
 ### 2.4 用户场景 anchor（与常规用例分开管理）
 
-除 100 条生成用例外，每个接口额外有 **2 条手写用户场景**用例
-（`cases/user_scenarios_<base>.json`，报告单独产出）：
+除上表的生成用例（CANN 套件每接口 200 条，CPU / 双标杆 / 显存三套件每接口 50 条）外，每个接口额外有 **4 条手写用户场景**用例
+（`cases/user_scenarios_<base>.json`；同一条业务场景按 bf16 / fp16 各展开一份，报告单独产出）：
 
 | memo | 形状 | 说明 |
 |---|---|---|
-| `user_prefill_198` | q/k `[1,198,32,192]`、v `[1,198,32,128]`、`causal=True` | 训练 / 未吸收 prefill |
-| `user_decode_1025` | q `[1,1,32,64]`、k `[1,1025,1,64]`、v `[1,1025,1,512]`、qv `[1,1,32,512]`、`causal=False` | 推理 / 吸收 decode |
+| `user_prefill_198_bf16` / `_fp16` | q/k `[1,198,32,192]`、v `[1,198,32,128]`、`causal=True` | 训练 / 未吸收 prefill |
+| `user_decode_1025_bf16` / `_fp16` | q `[1,1,32,64]`、k `[1,1025,1,64]`、v `[1,1025,1,512]`、qv `[1,1,32,512]`、`causal=False` | 推理 / 吸收 decode |
 
 ### 2.5 执行步骤
 
@@ -185,15 +185,15 @@ atk task -c ../../../single_benchmark_cann/cases/user_scenarios_fa3_func.json \
 
 | 套件 | `all_*.json` 条数 | `user_scenarios_*.json` 条数 | 小计 |
 |---|---|---|---|
-| `single_benchmark_cann` | 5 × 100 = 500 | 5 × 2 = 10 | **510** |
-| `single_benchmark_cpu` | 7 × 100 = 700 | 5 × 2 = 10 | **710** |
-| `double_benchmark` | 7 × 100 = 700 | 5 × 2 = 10 | **710** |
-| `gpu_mem_compare` | 7 × 100 = 700 | 5 × 2 = 10 | **710** |
-| **合计** | | | **2640** |
+| `single_benchmark_cann` | 5 × 200 = 1000 | 5 × 4 = 20 | **1020** |
+| `single_benchmark_cpu` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
+| `double_benchmark` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
+| `gpu_mem_compare` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
+| **合计** | | | **2130** |
 
 ---
 
-## 3. funcs/ — 功能正确性用例（58 条）
+## 3. funcs/ — 功能正确性用例（116 条）
 
 针对 MLA 的**数值正确性**，用本地 golden 比对（rel-L2 / 容差），覆盖 prefill（未吸收）、decode（吸收）、GQA、paged、BNSD/BSND/TND 等各种组合。
 
@@ -207,9 +207,21 @@ ASCEND_RT_VISIBLE_DEVICES=0 python -m pytest \
 
 | 文件 | 覆盖 | 收集用例数 |
 |---|---|---|
-| `test_flash_attn_npu_v3_mla.py` | FA3 全部接口 | 25（15 个 `def test_*`；其中 2 个 `@parametrize batch[1,2] × kv_len[129,513,1025]` 各展开 6） |
-| `test_flash_attn_npu_v4_mla.py` | FA4 全部接口 | 17（12 个 `def test_*`；1 个 parametrize 展开 6） |
-| `test_flash_attn_npu_mla_consistency.py` | 训练(prefill) ↔ 推理(decode) 一致性、以及参数校验 | 16（9 个 `def test_*`；7 个 `@parametrize backend=[flash_attn_npu_3, flash_attn_npu_4]` 各展开 2，另有 2 个拒绝非法入参的用例） |
+| `test_flash_attn_npu_v3_mla.py` | FA3 全部接口 | 50（基础 25 × 2 精度；15 个 `def test_*`，其中 2 个 `@parametrize batch[1,2] × kv_len[129,513,1025]` 各展开 6） |
+| `test_flash_attn_npu_v4_mla.py` | FA4 全部接口 | 34（基础 17 × 2 精度；12 个 `def test_*`，其中 1 个 parametrize 展开 6） |
+| `test_flash_attn_npu_mla_consistency.py` | 训练(prefill) ↔ 推理(decode) 一致性、以及参数校验 | 32（基础 16 × 2 精度；9 个 `def test_*`，其中 7 个 `@parametrize backend=[flash_attn_npu_3, flash_attn_npu_4]` 各展开 2，另有 2 个拒绝非法入参的用例） |
+
+**精度覆盖**：上面每个文件里的模块级常量 `DTYPE` 由一个 autouse 参数化 fixture 在收集期翻倍，bf16 / fp16 各跑一遍，**无需改动任何测试签名**：
+
+```python
+DTYPES = [torch.bfloat16, torch.float16]
+
+@pytest.fixture(autouse=True, params=DTYPES, ids=["bf16", "fp16"])
+def _precision(request, monkeypatch):
+    """Run every case once per supported precision."""
+    monkeypatch.setattr(sys.modules[__name__], "DTYPE", request.param)
+    yield request.param
+```
 
 覆盖范围（用例名摘要）：`prefill_bsnd_func` / `prefill_tnd_varlen` / `prefill_bnsd` / `prefill_gqa` / `decode_bsnd_no_paged` / `decode_bsnd_paged` / `decode_bnsd_cross_batch` / `decode_bnsd_sq1_cross_batch` / `decode_kv_multicore` / `decode_kv_single_core` / `decode_tnd_varlen` / `decode_paged_varlen` / `decode_rejects_append_kv` / `rejects_gather_kv_indices` / `rejects_invalid_layout`。
 
@@ -217,7 +229,7 @@ ASCEND_RT_VISIBLE_DEVICES=0 python -m pytest \
 
 ---
 
-## 4. consistency/ — 接口间二进制一致性用例（8 条）
+## 4. consistency/ — 接口间二进制一致性用例（16 条）
 
 验证**同一版本内各公开接口对等价输入返回逐位相同（`torch.equal`）的结果**，覆盖 prefill 与 decode 两种用户场景（含 `heads_q = 128` 变体）。
 
@@ -232,7 +244,7 @@ ASCEND_RT_VISIBLE_DEVICES=0 python -m pytest \
 | `test_fa3_three_interfaces_bitwise_identical` | `flash_attn_func` vs `flash_attn_varlen_func` vs `flash_attn_with_kvcache` |
 | `test_fa4_two_interfaces_bitwise_identical` | `flash_attn_func` vs `flash_attn_varlen_func` |
 
-场景组合（`FORMS`，`@parametrize` 展开 4 × 2 = **8** 条）：
+场景组合（`@parametrize` 展开 4 个 form × 2 个接口 × 2 种精度 = **16** 条；`FORMS` 只定义 4 个业务 form）：
 
 | form | (Sq, Skv, Hq, Hkv, Dq, Dv, causal) |
 |---|---|
@@ -292,17 +304,20 @@ python docs/test/perf/mla_user_scenarios.py        # 可选：仅打印两个场
 
 | 分类 | 用例数 | 备注 |
 |---|---|---|
-| `atk/`（4 套件） | 2640 | 其中 2600 条为生成的常规用例，40 条为用户场景 anchor |
-| `funcs/`（3 文件） | 58 | pytest 静态统计 |
-| `consistency/`（1 文件） | 8 | 逐位一致，最严格 |
+| `atk/`（4 套件） | 2130 | 其中 2050 条为生成的常规用例（仅 `single_benchmark_cann` 每接口 200 条，其余三个套件每接口 50 条），80 条为用户场景 anchor |
+| `funcs/`（3 文件） | 116 | bf16 / fp16 各一遍 |
+| `consistency/`（1 文件） | 16 | 逐位一致，最严格 |
 | `perf/`（1 脚本） | 14 次测量 / 10 条门限 | 内核耗时 |
-| **合计** | **2720** | 不含 perf 的测量次数 |
+| **合计** | **2262** | 不含 perf 的测量次数 |
 
 ---
 
 ## 7. 注意事项与已知差异
 
 1. **历史文档里的路径已过期**：早期设计文档写的是 `tests/test_flash_attn_npu_*`、`tests/perf/...`，实际文件已迁到 `docs/test/` 下，请以本说明为准。
-2. **yaml 与生成器的版本差异**：已入库的 `fa3_func.yaml` 与当前 `gen_atk_mla.py` 产出的模板不完全一致（缺 `extra_numbers: 0`，且多出 `k_cache`/`v_cache`/索引输入），重建前请先确认。
+2. **atk 树已重新生成（2026-11-16）**：为补齐 fp16 覆盖，已用 `gen_atk_mla.py` 重跑整棵树（24 个 yaml / 20 个 `execute_*.py` / 20 个 `generate_*.py` / 20 个 `user_scenarios_*.json`）。副作用是 `generate_*.py` 里手工加的 per-interface 注释（如「实测 fa3_func 21/100」）会被规整回模板文案（纯注释，逻辑零差异）。另外 `cases/all_*.json` 由 `atk case` 在 `run_accuracy.sh` 内现生成，需重跑套件才会从 100 条刷新为 200 条。
 3. **`softmax_scale` 口径不一致**：`perf/mla_user_scenarios.py` 中的 `DEEPSEEK_SOFTMAX_SCALE = 0.14467962580268923` 与其注释「`192 ** -0.5`」对不上（`192 ** -0.5 ≈ 0.0721688`）；ATK 的用户场景用例（`user_scenarios_*.json`）里用的是 `0.07216878364870322`。建议核对 `usershape.txt` 后统一。
 4. **用例数量口径**：`atk` 的用例数来自 `cases/*.json`（`atk case` 的实际产出），`funcs`/`consistency` 来自 pytest 静态统计（`def test_*` × `parametrize` 展开），二者定义不同但都可用 `--collect-only` 复核。
+5. **ATK fp16 用例的精度回落尚未实测**：`execute_*.py` 新增的 `_case_dtype()` 从 `task_result.case_config.inputs` 读取用例配置的 dtype，让标杆路径（ATK 会把 bf16/fp16 输入统一升到 fp32）按原精度回落。该取数路径目前只做了静态核对；若运行期取不到配置 dtype，会兜底为 bf16 —— fp16 用例将被静默降级，**首次跑 ATK 时请抽查一条 fp16 用例确认**。
+6. **CPU / GPU 标杆套件用例已减至 50 条/接口（2026-11-17）**：`single_benchmark_cpu`、`double_benchmark`、`gpu_mem_compare` 的 `dtype_numbers` 均由 100 降为 25（总条数 = `max(各输入的 dtype 个数) × n` = 2 × 25 = 50），以缩短 CPU fp32 / GPU 标杆耗时；仅 `single_benchmark_cann` 保持每接口 200 条。`gen_atk_mla.py` 已同步该值，重建不会回退；三套件的 `cases/all_*.json` 已按新配置重新生成。
+7. **标杆 `execute_*.py` 的 decode（吸收态）分支已修复（2026-11-17）**：该分支此前漏传 `atten_mask` 且把 `sparse_mode` 写死为 `0`，使 `causal=True` 且 `Sq>1` 的吸收用例被 FIA 按**非 causal** 计算而产生大误差（`single_benchmark_cann` 1000 条中约 40 条）。现所有标杆分支统一对齐 prefill 写法（`atten_mask=mask` + `sparse_mode=3 if causal else 0`），已改 `single_benchmark_cann`、`double_benchmark` 共 10 个 `execute_*.py`（每个含 TND / BSND 两处）；`single_benchmark_cpu`、`gpu_mem_compare` 中的同名分支不参与判定，暂未改动。
