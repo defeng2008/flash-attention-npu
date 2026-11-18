@@ -1,0 +1,4 @@
+# 换行统一：shell 脚本必须用 LF。
+# 若检出成 CRLF，Linux 上会报 /usr/bin/env: 'bash\r': No such file or directory
+# 本规则优先级高于各机器上的 core.autocrlf 设置。
+*.sh text eol=lf
