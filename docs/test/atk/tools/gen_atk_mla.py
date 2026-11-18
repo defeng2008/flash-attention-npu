@@ -274,6 +274,20 @@ from benchmark_@@IFACE@@ import @@FN@@ as cpu_impl
 FIA_NODE_NAME = "@@BM_NAME@@"
 
 
+def _to_scalar(v):
+    """把 numpy 标量 / 0 维 tensor 还原成 python 原生标量，其余原样返回。
+
+    ATK 会把 yaml 里的标量参数 materialize 成 numpy 标量或 0 维 tensor，
+    而 CuTe DSL 只接受 python 原生 float/int/bool，否则 JIT 编译时报
+    "... to Float conversion is not supported"。
+    """
+    if isinstance(v, torch.Tensor) and v.dim() == 0:
+        return v.item()
+    if type(v).__module__ == "numpy" and hasattr(v, "item"):
+        return v.item()
+    return v
+
+
 @register("@@API_TYPE@@")
 class @@CLS@@(BaseApi):
     _ACCEPTED = set(inspect.signature(npu_fn).parameters)
@@ -300,7 +314,7 @@ class @@CLS@@(BaseApi):
 @@GPU_IMPORT@@
         gpu_fn = gpu_mod.@@GPU_FN@@
         accepted = set(inspect.signature(gpu_fn).parameters)
-        call = {n: v for n, v in kw.items() if n in accepted}
+        call = {n: _to_scalar(v) for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))
 
     def _case_dtype(self):
