@@ -11,16 +11,27 @@
 set -euo pipefail
 
 export CONDA_ENV="${ATK_CONDA_ENV:-cann}"
-export CANN_ROOT="${CANN_ROOT:-/home/w00811046/cann/cann-9.2.0-clean/ascend-toolkit}"
-export TMPDIR="${TMPDIR:-/home/w00811046/tmp}"
+export TMPDIR="${TMPDIR:-${HOME:-/tmp}/tmp}"
+mkdir -p "${TMPDIR}"
 ATK="${ATK_BIN:-atk}"
 
 # 加载 CANN 运行环境（torch_npu 需要 libhccl.so 等）
-if [ -f "${CANN_ROOT}/set_env.sh" ]; then
+# CANN：优先用 CANN_ROOT；未设置则在常见位置探测含 set_env.sh 的目录
+if [ -z "${CANN_ROOT:-}" ]; then
+  for _d in "${ASCEND_HOME:-}" "${HOME}"/cann/*/ascend-toolkit \
+            /usr/local/Ascend/ascend-toolkit/latest /usr/local/Ascend/ascend-toolkit/* \
+            /home/*/cann/*/ascend-toolkit; do
+    if [ -n "${_d}" ] && [ -f "${_d}/set_env.sh" ]; then CANN_ROOT="${_d}"; break; fi
+  done
+fi
+if [ -n "${CANN_ROOT:-}" ] && [ -f "${CANN_ROOT}/set_env.sh" ]; then
   # shellcheck disable=SC1091
   source "${CANN_ROOT}/set_env.sh"
 else
-  echo "[warn] 未找到 ${CANN_ROOT}/set_env.sh，请用 CANN_ROOT 指定含 set_env.sh 的 CANN 目录" >&2
+  echo "[error] 找不到 CANN set_env.sh（torch_npu 依赖它）。请指定含 set_env.sh 的目录后重试：" >&2
+  echo "        export CANN_ROOT=/usr/local/Ascend/ascend-toolkit/latest   # 换成实际路径" >&2
+  echo "        查找：find / -name set_env.sh -path '*ascend-toolkit*' 2>/dev/null | head" >&2
+  exit 1
 fi
 # 已激活环境里有 atk 就直接用，否则经 conda run 进入 CONDA_ENV
 if command -v "${ATK}" >/dev/null 2>&1; then

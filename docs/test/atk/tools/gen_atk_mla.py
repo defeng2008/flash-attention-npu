@@ -92,7 +92,9 @@ def variants(iface, cat):
 
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    # 强制 LF：write_text 用平台默认换行，Windows 上生成 .sh 会变 CRLF，
+    # 到 Linux 上执行时报 "/usr/bin/env: 'bash\r': No such file or directory"。
+    path.write_bytes(text.replace("\r\n", "\n").encode("utf-8"))
     if path.suffix == ".sh":
         path.chmod(path.stat().st_mode | 0o111)
 
