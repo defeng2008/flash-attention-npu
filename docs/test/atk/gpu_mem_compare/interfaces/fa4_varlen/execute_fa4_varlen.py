@@ -56,7 +56,7 @@ class Fa4VarlenMem(BaseApi):
     def _gpu(self, kw):
         """官方 TriDao GPU 标杆（惰性导入，无 GPU 环境时不执行）。"""
         from flash_attn.cute import interface as gpu_mod
-        gpu_fn = gpu_mod.flash_attn_func
+        gpu_fn = gpu_mod.flash_attn_varlen_func
         accepted = set(inspect.signature(gpu_fn).parameters)
         call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))

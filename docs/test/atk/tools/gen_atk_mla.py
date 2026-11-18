@@ -50,7 +50,8 @@ GPU_IMPORTS = {
             "        except ImportError:\n"
             "            from flash_attn_3 import flash_attn_interface as gpu_mod",
             None),  # None = 用接口自身的 fn（flash_attn_func / _varlen_func / _with_kvcache）
-    "fa4": ("        from flash_attn.cute import interface as gpu_mod", "flash_attn_func"),
+    "fa4": ("        from flash_attn.cute import interface as gpu_mod",
+            None),  # None = 用接口自身的 fn（fa4_func→flash_attn_func / fa4_varlen→_varlen_func）
 }
 
 # category -> (kind, nodes file, run file, bm_device, task, multi, 说明)
@@ -1001,7 +1002,7 @@ def main():
             # 4) ATK cpu/gpu/npu adapter
             npu_import = f"from {f['meta']['pkg']} import {f['meta']['fn']} as npu_fn"
             gpu_import, gpu_fn = GPU_IMPORTS[f["meta"]["gpu"]]
-            gpu_fn = gpu_fn or f["meta"]["fn"]  # fa3 族：GPU 标杆入口与该接口的 fn 一致
+            gpu_fn = gpu_fn or f["meta"]["fn"]  # fa3/fa4 族：GPU 标杆入口与该接口的 fn 一致
             write(idir / f"execute_{iface}.py",
                   EXECUTE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
                          .replace("@@FN@@", f["meta"]["fn"]).replace("@@NPU_IMPORT@@", npu_import)
