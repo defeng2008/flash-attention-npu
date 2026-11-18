@@ -59,7 +59,7 @@ class Fa3VarlenApi(BaseApi):
             import flash_attn_interface as gpu_mod
         except ImportError:
             from flash_attn_3 import flash_attn_interface as gpu_mod
-        gpu_fn = gpu_mod.flash_attn_with_kvcache
+        gpu_fn = gpu_mod.flash_attn_varlen_func
         accepted = set(inspect.signature(gpu_fn).parameters)
         call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))
