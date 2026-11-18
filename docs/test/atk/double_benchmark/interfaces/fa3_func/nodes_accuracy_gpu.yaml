@@ -5,7 +5,7 @@ nodes:
   - backend: cpu
     task: [accuracy]
   - backend: gpu
-    host: 192.168.0.100  # TODO: 改为 GPU 主机 IP
-    port: 9090
+    host: 90.90.81.190
+    port: 9999
     devices: [0]
     task: [accuracy]
