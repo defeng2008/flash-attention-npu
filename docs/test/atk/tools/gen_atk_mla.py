@@ -74,6 +74,16 @@ CATEGORIES = {
 }
 CAT_ORDER = ["double_benchmark", "single_benchmark_cpu", "single_benchmark_cann", "gpu_mem_compare"]
 
+# 官方 FA4 cute（CuTe）在 H200/SM90 上只支持 head_dim_v <= 128（256 编不过、512 直接被拒），
+# 所以 GPU 标杆类别里的 fa4 只出 prefill 形状（q/k 末维 192、v 末维 128）；
+# decode 吸收态（dv=512）的覆盖交给 single_benchmark_cpu / single_benchmark_cann。
+GPU_BENCHMARK_CATS = {"double_benchmark", "gpu_mem_compare"}
+
+
+def prefill_only(iface, cat):
+    """该 (接口, 类别) 是否只出 prefill 形状。"""
+    return iface.startswith("fa4") and cat in GPU_BENCHMARK_CATS
+
 
 def stem_of(iface, cat, paged=False):
     """用例/yaml 的 stem：mem 类加 _mem 后缀，paged 变体加 _paged 后缀。"""
@@ -641,8 +651,10 @@ def build_user_scenarios(iface, cat):
     # (form, B, Sq, Sk, causal, window, paged, label)
     rows = [
         ("prefill", 1, 198, 198, True, (-1, -1), False, "user_prefill_198"),
-        ("decode", 1, 1, 1025, False, (-1, -1), False, "user_decode_1025"),
     ]
+    if not prefill_only(iface, cat):
+        # GPU 标杆类别（H200/SM90）跑不了 decode 吸收态，anchor 也去掉这条。
+        rows.append(("decode", 1, 1, 1025, False, (-1, -1), False, "user_decode_1025"))
     # 每条业务 shape 各出 bf16 / fp16 两个精度，与生成用例的精度覆盖保持一致。
     cases = []
     for form, B, Sq, Sk, causal, window, paged, label in rows:
@@ -732,16 +744,24 @@ def inputs_for(iface, cat, paged):
     """按接口形态拼出 yaml 的 inputs 段。"""
     meta = IFACES[iface]
     can_window = cat != "single_benchmark_cann"
+    # GPU 标杆类别下 fa4 只出 prefill：q/k 末维固定 192、v 末维固定 128，并去掉只在
+    # decode 吸收态出现的 qv。
+    pref = prefill_only(iface, cat)
+
+    def dims(base, last):
+        return base[:-1] + [last] if pref else base
+
     blocks = []
     if meta["layout"] == "tnd":
-        blocks.append(_in_tensor("q", _Q_TND, "[total_q, Hq, Dq]，TND 打包布局（本文件按单序列打包）"))
+        blocks.append(_in_tensor("q", dims(_Q_TND, [192]), "[total_q, Hq, Dq]，TND 打包布局（本文件按单序列打包）"))
         if paged:
-            blocks.append(_in_tensor("k", _K_PAGED, "paged KV: [num_blocks, block_size, Hk, Dk]"))
-            blocks.append(_in_tensor("v", _V_PAGED, "paged KV: [num_blocks, block_size, Hk, Dv]"))
+            blocks.append(_in_tensor("k", dims(_K_PAGED, [192]), "paged KV: [num_blocks, block_size, Hk, Dk]"))
+            blocks.append(_in_tensor("v", dims(_V_PAGED, [128]), "paged KV: [num_blocks, block_size, Hk, Dv]"))
         else:
-            blocks.append(_in_tensor("k", _K_TND, "k: [total_k, Hk, Dk]"))
-            blocks.append(_in_tensor("v", _V_TND, "v: [total_k, Hk, Dv]"))
-        blocks.append(_in_tensor("qv", _QV_TND, "qv: 吸收态专用 [total_q, Hq, 512]；prefill 用例会被钩子摘掉"))
+            blocks.append(_in_tensor("k", dims(_K_TND, [192]), "k: [total_k, Hk, Dk]"))
+            blocks.append(_in_tensor("v", dims(_V_TND, [128]), "v: [total_k, Hk, Dv]"))
+        if not pref:
+            blocks.append(_in_tensor("qv", _QV_TND, "qv: 吸收态专用 [total_q, Hq, 512]；prefill 用例会被钩子摘掉"))
         blocks.append(_in_index("cu_seqlens_q", "每个 sequence 的 q 累计长度（钩子写死成 [0, total_q]）"))
         if paged:
             blocks.append(_in_index("page_table", "page_table: [batch, num_blocks]（钩子写死成连续块）",
@@ -767,10 +787,11 @@ def inputs_for(iface, cat, paged):
         blocks.append(_in_attr("cache_seqlens", "int", [198, 384, 1025],
                                "KV cache 有效长度（钩子改成实际 kv_len）"))
     else:
-        blocks.append(_in_tensor("q", _Q_BSND, "q: [batch, seqlen_q, Hq, Dq]"))
-        blocks.append(_in_tensor("k", _K_BSND, "k: [batch, kv_len, Hk, Dk]"))
-        blocks.append(_in_tensor("v", _V_BSND, "v: [batch, kv_len, Hk, Dv]"))
-        blocks.append(_in_tensor("qv", _QV_BSND, "qv: 吸收态专用；prefill 用例会被钩子摘掉"))
+        blocks.append(_in_tensor("q", dims(_Q_BSND, [192]), "q: [batch, seqlen_q, Hq, Dq]"))
+        blocks.append(_in_tensor("k", dims(_K_BSND, [192]), "k: [batch, kv_len, Hk, Dk]"))
+        blocks.append(_in_tensor("v", dims(_V_BSND, [128]), "v: [batch, kv_len, Hk, Dv]"))
+        if not pref:
+            blocks.append(_in_tensor("qv", _QV_BSND, "qv: 吸收态专用；prefill 用例会被钩子摘掉"))
     blocks.append(_in_attr("softmax_scale", "float", [SCALE], "MLA 固定 192^-0.5"))
     blocks.append(_in_attr("causal", "bool", ["false", "true"], "causal / 非 causal 各一半"))
     if can_window:
@@ -788,19 +809,22 @@ def build_yaml(iface, cat, paged=False):
     dn = cfg.get("dtype_numbers", 100)
     api_type = f"{iface}_mla_{'mem' if cfg['kind'] == 'mem' else 'accuracy'}"
     paired = "" if cat != "single_benchmark_cann" else "（该类别不出 paged 变体：标杆 FIA 没有 page_table 入参）"
+    pref = prefill_only(iface, cat)
     # 形状注释按接口形态/是否 paged 变化，避免给测试同事看时出现无关内容
     if meta["layout"] == "bsnd":
         shapes = [
             "# 生成后每条用例的形状（钩子改写之后）：",
             "#   BSND prefill : q[B,Sq,32,192]  k[B,Sk,32,192]   v[B,Sk,32,128]",
+        ] + ([] if pref else [
             "#   BSND decode  : q[B,Sq,32,64]   qv[B,Sq,32,512]  k[B,Sk,1,64]  v[B,Sk,1,512]",
-        ]
+        ])
     else:
         shapes = [
             "# 生成后每条用例的形状（钩子改写之后；TND 按单序列打包）：",
             "#   TND prefill  : q[Tq,32,192]  k[Tk,32,192]  v[Tk,32,128]  cu_seqlens_x=[0,Tx]",
+        ] + ([] if pref else [
             "#   TND decode   : q[Tq,32,64]   qv[Tq,32,512] k[Tk,1,64]    v[Tk,1,512]",
-        ]
+        ])
     if meta["paged"]:
         shapes.append("#   paged        : KV 变 [num_blocks,128,H,D]，另加 page_table（页表写成连续块）")
     head = [
@@ -821,7 +845,12 @@ def build_yaml(iface, cat, paged=False):
         "#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）",
         "#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）",
         "#",
-    ] + shapes
+    ] + ([
+        "# GPU 标杆限定：官方 FA4 cute 在 H200(SM90) 上只支持 head_dim_v<=128，",
+        "# decode 吸收态(dv=512) 无法运行，故本类别只出 prefill 形状；",
+        "# decode 的覆盖见 single_benchmark_cpu / single_benchmark_cann。",
+        "#",
+    ] if pref else []) + shapes
     body = [
         f"name: {meta['pkg']}.{meta['fn']}",
         "api: pytorch",
