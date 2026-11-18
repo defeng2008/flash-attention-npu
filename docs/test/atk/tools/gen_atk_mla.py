@@ -254,8 +254,12 @@ from pathlib import Path
 
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[7]
-sys.path.insert(0, str(PROJECT_ROOT / "flash-attention-npu"))
+_HERE = Path(__file__).resolve()
+sys.path.insert(0, str(_HERE.parent))
+for _parent in _HERE.parents:
+    if (_parent / "flash-attention-npu").is_dir():
+        sys.path.insert(0, str(_parent / "flash-attention-npu"))
+        break
 
 from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi

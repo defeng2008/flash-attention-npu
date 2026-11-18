@@ -6,22 +6,38 @@ from pathlib import Path
 
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[7]
-sys.path.insert(0, str(PROJECT_ROOT / "flash-attention-npu"))
+_HERE = Path(__file__).resolve()
+sys.path.insert(0, str(_HERE.parent))
+for _parent in _HERE.parents:
+    if (_parent / "flash-attention-npu").is_dir():
+        sys.path.insert(0, str(_parent / "flash-attention-npu"))
+        break
 
 from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi
 
 from benchmark_fa4_varlen import flash_attn_varlen_func as cpu_impl
 
-from flash_attn_npu_4 import flash_attn_varlen_func as npu_fn
 
-FIA_NODE_NAME = "fia_mla"
+def _npu_fn():
+    """惰性导入 NPU 候选实现：CPU/GPU 机器没有 torch_npu，
+    模块级导入会让 @register 直接失败。"""
+    from flash_attn_npu_4 import flash_attn_varlen_func as fn
+    return fn
+
+FIA_NODE_NAME = "@@BM_NAME@@"
 
 
 @register("fa4_varlen_mla_accuracy")
 class Fa4VarlenApi(BaseApi):
-    _ACCEPTED = set(inspect.signature(npu_fn).parameters)
+    _NPU_ACCEPTED = None
+
+    @classmethod
+    def _npu_accepted(cls):
+        """NPU 入口参数集合：首次调用才导入 NPU 实现，CPU/GPU 机器上模块导入不应失败。"""
+        if cls._NPU_ACCEPTED is None:
+            cls._NPU_ACCEPTED = set(inspect.signature(_npu_fn()).parameters)
+        return cls._NPU_ACCEPTED
 
     @staticmethod
     def _move(kw, dev):
@@ -36,7 +52,8 @@ class Fa4VarlenApi(BaseApi):
         if self.device == "npu":
             if FIA_NODE_NAME and getattr(self, "name", "") == FIA_NODE_NAME:
                 return self._fia(kw)
-            return npu_fn(**self._move({n: v for n, v in kw.items() if n in self._ACCEPTED},
+            npu_fn = _npu_fn()
+            return npu_fn(**self._move({n: v for n, v in kw.items() if n in self._npu_accepted()},
                                        f"npu:{self.device_id}"))
         raise RuntimeError(f"Unsupported backend: {self.device}")
 
