@@ -1,4 +1,4 @@
-"""ATK cpu/gpu/npu adapter for fa4_varlen (gpu_mem_compare)."""
+"""ATK cpu/gpu/npu adapter for fa3_kvcache (gpu_mem_compare)."""
 
 import inspect
 import sys
@@ -16,32 +16,18 @@ for _parent in _HERE.parents:
 from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi
 
-from benchmark_fa4_varlen import flash_attn_varlen_func as cpu_impl
+from benchmark_fa3_kvcache_mem import flash_attn_with_kvcache as cpu_impl
 
 
 def _npu_fn():
     """惰性导入 NPU 候选实现：CPU/GPU 机器没有 torch_npu，
     模块级导入会让 @register 直接失败。"""
-    from flash_attn_npu_4 import flash_attn_varlen_func as fn
+    from flash_attn_npu_3 import flash_attn_with_kvcache as fn
     return fn
 
 
-def _to_scalar(v):
-    """把 numpy 标量 / 0 维 tensor 还原成 python 原生标量，其余原样返回。
-
-    ATK 会把 yaml 里的标量参数 materialize 成 numpy 标量或 0 维 tensor，
-    而 CuTe DSL 只接受 python 原生 float/int/bool，否则 JIT 编译时报
-    "... to Float conversion is not supported"。
-    """
-    if isinstance(v, torch.Tensor) and v.dim() == 0:
-        return v.item()
-    if type(v).__module__ == "numpy" and hasattr(v, "item"):
-        return v.item()
-    return v
-
-
-@register("fa4_varlen_mla_mem")
-class Fa4VarlenMem(BaseApi):
+@register("fa3_kvcache_mla_mem")
+class Fa3KvcacheMem(BaseApi):
     _NPU_ACCEPTED = None
 
     @classmethod
@@ -69,8 +55,11 @@ class Fa4VarlenMem(BaseApi):
 
     def _gpu(self, kw):
         """官方 TriDao GPU 标杆（惰性导入，无 GPU 环境时不执行）。"""
-        from flash_attn.cute import interface as gpu_mod
-        gpu_fn = gpu_mod.flash_attn_varlen_func
+        try:
+            import flash_attn_interface as gpu_mod
+        except ImportError:
+            from flash_attn_3 import flash_attn_interface as gpu_mod
+        gpu_fn = gpu_mod.flash_attn_with_kvcache
         accepted = set(inspect.signature(gpu_fn).parameters)
-        call = {n: _to_scalar(v) for n, v in kw.items() if n in accepted}
+        call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))

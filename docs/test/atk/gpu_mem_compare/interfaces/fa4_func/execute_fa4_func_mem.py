@@ -16,7 +16,7 @@ for _parent in _HERE.parents:
 from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi
 
-from benchmark_fa4_func import flash_attn_func as cpu_impl
+from benchmark_fa4_func_mem import flash_attn_func as cpu_impl
 
 
 def _npu_fn():

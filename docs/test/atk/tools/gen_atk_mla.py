@@ -277,7 +277,7 @@ for _parent in _HERE.parents:
 from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi
 
-from benchmark_@@IFACE@@ import @@FN@@ as cpu_impl
+from benchmark_@@IFACE@@@@SFX@@ import @@FN@@ as cpu_impl
 
 @@NPU_IMPORT@@
 
@@ -808,6 +808,8 @@ def build_yaml(iface, cat, paged=False):
     stem = stem_of(iface, cat, paged)
     dn = cfg.get("dtype_numbers", 100)
     api_type = f"{iface}_mla_{'mem' if cfg['kind'] == 'mem' else 'accuracy'}"
+    # mem 类型（gpu_mem_compare）的适配器/标杆/钩子文件名都带 _mem 后缀，与精度套件区分
+    sfx = "_mem" if cfg["kind"] == "mem" else ""
     paired = "" if cat != "single_benchmark_cann" else "（该类别不出 paged 变体：标杆 FIA 没有 page_table 入参）"
     pref = prefill_only(iface, cat)
     # 形状注释按接口形态/是否 paged 变化，避免给测试同事看时出现无关内容
@@ -838,7 +840,7 @@ def build_yaml(iface, cat, paged=False):
         "#",
         "# 两个必须知道的约定：",
         "#  1) ATK 会按下面的取值范围**逐维独立**随机每个输入，所以 k/v/qv/cache/索引张量",
-        f"#     之间不可能自洽；跨输入的耦合全部由 generate_{iface}.py 里的钩子按 MLA 的",
+        f"#     之间不可能自洽；跨输入的耦合全部由 generate_{iface}{sfx}.py 里的钩子按 MLA 的",
         "#     数学契约统一改写（头数、末维、cache 与索引张量的内容/长度等）。",
         "#     因此这里只写「每一维的候选取值」，不描述输入之间的对应关系。",
         "#  2) 形态由 q 的最后一维决定：",
@@ -1022,7 +1024,10 @@ def iface_files(iface, cat):
     api_type = f"{iface}_mla_{'mem' if kind == 'mem' else 'accuracy'}"
     bm_name = "fia_mla" if cat == "single_benchmark_cann" else ""
     cls = "".join(p.capitalize() for p in iface.split("_")) + ("Mem" if kind == "mem" else "Api")
-    return dict(api_type=api_type, cls=cls, bm_name=bm_name, meta=meta, kind=kind)
+    # 适配器 / CPU 标杆的文件名带 _mem 后缀（与 yaml、register key 一致），
+    # 避免和精度套件（single_benchmark_* / double_benchmark）里同名文件混淆。
+    sfx = "_mem" if kind == "mem" else ""
+    return dict(api_type=api_type, cls=cls, bm_name=bm_name, meta=meta, kind=kind, sfx=sfx)
 
 
 def main():
@@ -1035,19 +1040,20 @@ def main():
             for stem, paged in variants(iface, cat):
                 write(idir / f"{stem}.yaml", build_yaml(iface, cat, paged=paged))
             # 2) 跨输入约束钩子
-            write(idir / f"generate_{iface}.py",
+            write(idir / f"generate_{iface}{f['sfx']}.py",
                   GENERATE.replace("@@IFACE@@", iface)
                           .replace("@@CLS@@", "".join(p.capitalize() for p in iface.split("_"))))
             # 3) CPU fp32 golden
-            write(idir / f"benchmark_{iface}.py",
+            write(idir / f"benchmark_{iface}{f['sfx']}.py",
                   BENCHMARK.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
                           .replace("@@FN@@", f["meta"]["fn"]))
             # 4) ATK cpu/gpu/npu adapter
             npu_import = f"from {f['meta']['pkg']} import {f['meta']['fn']} as npu_fn"
             gpu_import, gpu_fn = GPU_IMPORTS[f["meta"]["gpu"]]
             gpu_fn = gpu_fn or f["meta"]["fn"]  # fa3/fa4 族：GPU 标杆入口与该接口的 fn 一致
-            write(idir / f"execute_{iface}.py",
+            write(idir / f"execute_{iface}{f['sfx']}.py",
                   EXECUTE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
+                         .replace("@@SFX@@", f["sfx"])
                          .replace("@@FN@@", f["meta"]["fn"]).replace("@@NPU_IMPORT@@", npu_import)
                          .replace("@@API_TYPE@@", f["api_type"]).replace("@@CLS@@", f["cls"])
                          .replace("@@BM_NAME@@", f["bm_name"])

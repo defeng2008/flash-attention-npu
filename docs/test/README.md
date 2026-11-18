@@ -70,7 +70,7 @@ export TMPDIR=/home/w00811046/tmp
 - `*_paged.yaml` 分页变体只出现在 **`fa3_kvcache`** 与 **`fa4_varlen`**（其 `paged=True`）。
 - `single_benchmark_cann` **不含** paged 变体（CANN FIA 无 `page_table` 入参）。
 - 因此 yaml 数量：`single_benchmark_cann` = 5，其余三个套件各 = 7。
-- `gpu_mem_compare` 的文件名带 `_mem` 后缀（如 `fa3_func_mem.yaml`）。
+- `gpu_mem_compare` 的载体文件名统一带 `_mem` 后缀（yaml / 钩子 / 标杆 / 适配器，如 `fa3_func_mem.yaml`、`generate_fa3_func_mem.py`、`benchmark_fa3_func_mem.py`、`execute_fa3_func_mem.py`），与精度套件区分。
 
 ### 2.3 用例范围与组合方式
 
@@ -120,7 +120,7 @@ inputs:
 | 索引张量 | `cu_seqlens_q/k`、`page_table`、`seqused_k`（`int32`，`max_length: 4096`） | 真实取值由钩子写死 |
 | 用例条数 | `dtype_numbers: 100`（CANN）/ `25`（CPU、GPU 标杆） | 总条数 = `max(各输入的 dtype 个数) × dtype_numbers`；CANN 套件 2 × 100 = **200**，CPU / 双标杆 / 显存三套件 2 × 25 = **50**（bf16 / fp16 各半） |
 
-**跨输入的 MLA 契约**由 `interfaces/<iface>/generate_<iface>.py` 里的 `after_case_config` 钩子统一改写（这是保证用例合法性的关键）：
+**跨输入的 MLA 契约**由 `interfaces/<iface>/generate_<iface>.py` 里的 `after_case_config` 钩子统一改写（显存套件为 `generate_<iface>_mem.py`；这是保证用例合法性的关键）：
 
 - prefill：q/k 末维 192，**摘除 qv**；
 - decode：q 末维 64 + `qv` 末维 512，`Hk = 1`；
