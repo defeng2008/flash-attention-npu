@@ -1,7 +1,6 @@
 """ATK cpu/gpu/npu adapter for fa3_varlen (gpu_mem_compare)."""
 
 import inspect
-import os
 import sys
 from pathlib import Path
 
@@ -18,7 +17,6 @@ from benchmark_fa3_varlen import flash_attn_varlen_func as cpu_impl
 from flash_attn_npu_3 import flash_attn_varlen_func as npu_fn
 
 FIA_NODE_NAME = ""
-DAOAI_ROOT = os.environ.get("DAOAI_ROOT", "/home/w00811046/code/mla/daoailab")
 
 
 @register("fa3_varlen_mla_mem")
@@ -43,15 +41,12 @@ class Fa3VarlenMem(BaseApi):
         raise RuntimeError(f"Unsupported backend: {self.device}")
 
     def _gpu(self, kw):
-        """daoailab GPU benchmark (只读依赖，无 GPU 环境时不执行)。"""
-        if DAOAI_ROOT not in sys.path:
-            sys.path.insert(0, DAOAI_ROOT)
-        if "fa3" == "fa3":
-            from hopper import flash_attn_interface as gpu_mod
-            gpu_fn = gpu_mod.flash_attn_with_kvcache
-        else:
-            from flash_attn.cute import interface as gpu_mod
-            gpu_fn = gpu_mod.flash_attn_func
+        """官方 TriDao GPU 标杆（惰性导入，无 GPU 环境时不执行）。"""
+        try:
+            import flash_attn_interface as gpu_mod
+        except ImportError:
+            from flash_attn_3 import flash_attn_interface as gpu_mod
+        gpu_fn = gpu_mod.flash_attn_with_kvcache
         accepted = set(inspect.signature(gpu_fn).parameters)
         call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))

@@ -195,7 +195,7 @@ atk task -c ../../../single_benchmark_cann/cases/user_scenarios_fa3_func.json \
 
 ### 2.7 GPU 标杆主机配置（`double_benchmark` / `gpu_mem_compare`）
 
-这两个套件比 `nodes_accuracy.yaml` 多一个**远端 GPU 节点**（daoailab 的 Hopper 实现），出货时是占位 IP：
+这两个套件比 `nodes_accuracy.yaml` 多一个**远端 GPU 节点**（官方 TriDao flash-attn：FA3 Hopper / FA4 CuTe 实现），出货时是占位 IP：
 
 | 套件 | 节点文件（每个接口目录一份） | 占位内容 |
 |---|---|---|
@@ -233,7 +233,7 @@ atk server -h 0.0.0.0 -p 9090 --devices 0 --plugin_path .
 # --plugin_path ../..        # = double_benchmark/
 ```
 
-3. **GPU 主机依赖**：该机上要有 atk 运行环境（含 `torch` + GPU 版框架）与 daoailab 仓库 —— `execute_*.py` 的 `_gpu()` 从 `DAOAI_ROOT` 目录导入 `hopper.flash_attn_interface`，`DAOAI_ROOT` 默认 `/home/w00811046/code/mla/daoailab`，可用环境变量覆盖。
+3. **GPU 主机依赖**：该机上要有 atk 运行环境（含 `torch` + GPU 版框架）与官方 TriDao flash-attn（装进环境即可）—— `execute_*.py` 的 `_gpu()` 惰性导入 `flash_attn_interface`（FA3，缺失时回落 `flash_attn_3.flash_attn_interface`）或 `flash_attn.cute.interface`（FA4），不依赖任何固定仓库路径。
 
 > `atk server` 的 `-p` 是**端口**，而 `atk task` 的 `-p` 是**插件路径**（`--plugin_path`），两者不是同一个参数；IP 不通或 GPU 侧 server 未启动时，任务会在连接该节点时失败（拒绝/超时）。
 >

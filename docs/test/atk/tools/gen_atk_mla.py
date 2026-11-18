@@ -43,6 +43,16 @@ IFACES = {
 }
 IFACE_ORDER = ["fa3_func", "fa3_varlen", "fa3_kvcache", "fa4_func", "fa4_varlen"]
 
+# GPU 标杆的导入与入口函数：fa3 走官方 hopper 包，fa4 走官方 CuTe 接口
+GPU_IMPORTS = {
+    "fa3": ("        try:\n"
+            "            import flash_attn_interface as gpu_mod\n"
+            "        except ImportError:\n"
+            "            from flash_attn_3 import flash_attn_interface as gpu_mod",
+            "flash_attn_with_kvcache"),
+    "fa4": ("        from flash_attn.cute import interface as gpu_mod", "flash_attn_func"),
+}
+
 # category -> (kind, nodes file, run file, bm_device, task, multi, 说明)
 # dtype_numbers 决定每个 dtype 生成多少条用例，总条数 = dtype 个数 × dtype_numbers；
 # 只有 CANN 标杆保留每接口 200 条（2 个 dtype × 100）；
@@ -239,7 +249,6 @@ done
 EXECUTE = '''"""ATK cpu/gpu/npu adapter for @@IFACE@@ (@@CAT@@)."""
 
 import inspect
-import os
 import sys
 from pathlib import Path
 
@@ -256,7 +265,6 @@ from benchmark_@@IFACE@@ import @@FN@@ as cpu_impl
 @@NPU_IMPORT@@
 
 FIA_NODE_NAME = "@@BM_NAME@@"
-DAOAI_ROOT = os.environ.get("DAOAI_ROOT", "/home/w00811046/code/mla/daoailab")
 
 
 @register("@@API_TYPE@@")
@@ -281,15 +289,9 @@ class @@CLS@@(BaseApi):
         raise RuntimeError(f"Unsupported backend: {self.device}")
 
     def _gpu(self, kw):
-        """daoailab GPU benchmark (只读依赖，无 GPU 环境时不执行)。"""
-        if DAOAI_ROOT not in sys.path:
-            sys.path.insert(0, DAOAI_ROOT)
-        if "@@GPU_KIND@@" == "fa3":
-            from hopper import flash_attn_interface as gpu_mod
-            gpu_fn = gpu_mod.flash_attn_with_kvcache
-        else:
-            from flash_attn.cute import interface as gpu_mod
-            gpu_fn = gpu_mod.flash_attn_func
+        """官方 TriDao GPU 标杆（惰性导入，无 GPU 环境时不执行）。"""
+@@GPU_IMPORT@@
+        gpu_fn = gpu_mod.@@GPU_FN@@
         accepted = set(inspect.signature(gpu_fn).parameters)
         call = {n: v for n, v in kw.items() if n in accepted}
         return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))
@@ -992,11 +994,13 @@ def main():
                           .replace("@@FN@@", f["meta"]["fn"]))
             # 4) ATK cpu/gpu/npu adapter
             npu_import = f"from {f['meta']['pkg']} import {f['meta']['fn']} as npu_fn"
+            gpu_import, gpu_fn = GPU_IMPORTS[f["meta"]["gpu"]]
             write(idir / f"execute_{iface}.py",
                   EXECUTE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
                          .replace("@@FN@@", f["meta"]["fn"]).replace("@@NPU_IMPORT@@", npu_import)
                          .replace("@@API_TYPE@@", f["api_type"]).replace("@@CLS@@", f["cls"])
-                         .replace("@@BM_NAME@@", f["bm_name"]).replace("@@GPU_KIND@@", f["meta"]["gpu"]))
+                         .replace("@@BM_NAME@@", f["bm_name"])
+                         .replace("@@GPU_IMPORT@@", gpu_import).replace("@@GPU_FN@@", gpu_fn))
             # 5) nodes + run 脚本
             write(idir / cfg["nodes"], NODES[cfg["nodes"]])
             write(idir / cfg["run"],
