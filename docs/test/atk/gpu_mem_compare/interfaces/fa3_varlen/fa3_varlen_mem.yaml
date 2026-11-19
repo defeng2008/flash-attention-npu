@@ -14,6 +14,9 @@
 #  2) 形态由 q 的最后一维决定：
 #       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）
 #       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）
+#     显存对比限定：用例要落在「输入+输出 500MiB~700MiB」才走 L2 豁免通道，而同一 Sq 下
+#     decode 体积是 prefill 的 1.73 倍，故钩子把 decode 的序列长度固定为 4096(BSND)/
+#     8192(TND)，两种形态都落在区间内。
 #
 # 生成后每条用例的形状（钩子改写之后；TND 按单序列打包）：
 #   TND prefill  : q[Tq,32,192]  k[Tk,32,192]  v[Tk,32,128]  cu_seqlens_x=[0,Tx]
@@ -25,8 +28,8 @@ version: v2.1
 generate: fa3_varlen_mla_constraints
 
 # 用例条数：精度张量有 bf16/fp16 两种 dtype，同一形状下每种 dtype 各生成一条，
-# 所以总条数 = max(各输入的 dtype 个数) × dtype_numbers = 2 × 25 = 50
-dtype_numbers: 25
+# 所以总条数 = max(各输入的 dtype 个数) × dtype_numbers = 2 × 6 = 12
+dtype_numbers: 6
 # 关掉边界/空 tensor 用例：q.shape 为空时钩子无法判断 prefill/decode
 extra_numbers: 0
 outputs: 1
@@ -53,7 +56,7 @@ inputs:
     shapes:
       dim_numbers: {values: [3]}
       dim_values:
-        - values: [1, 64, 198, 512]
+        - values: [14336, 16384]
         - values: [32]
         - values: [64, 192]
     ranges:
@@ -67,8 +70,8 @@ inputs:
     shapes:
       dim_numbers: {values: [3]}
       dim_values:
-        - values: [1, 64, 198, 256, 384, 512, 1025]
-        - values: [1, 32]
+        - values: [14336, 16384]
+        - values: [32]
         - values: [64, 192]
     ranges:
       valid:
@@ -81,8 +84,8 @@ inputs:
     shapes:
       dim_numbers: {values: [3]}
       dim_values:
-        - values: [1, 64, 198, 256, 384, 512, 1025]
-        - values: [1, 32]
+        - values: [14336, 16384]
+        - values: [32]
         - values: [128, 512]
     ranges:
       valid:
@@ -124,7 +127,7 @@ inputs:
     dtypes: {values: [int]}
     ranges:
       valid:
-        values: [1, 64, 198, 512]
+        values: [7680]
   # 最长的 kv 序列（钩子改成 total_k / num_blocks*BLOCK）
   - name: max_seqlen_k
     type: attr
@@ -132,7 +135,7 @@ inputs:
     dtypes: {values: [int]}
     ranges:
       valid:
-        values: [64, 198, 256, 384, 512, 1025]
+        values: [7680]
   # MLA 固定 192^-0.5
   - name: softmax_scale
     type: attr

@@ -118,19 +118,20 @@ inputs:
 | 数值范围 | `ranges.valid.values` = `[-5.0, 5.0]` | 随机数分布区间 |
 | 属性 | `causal`、`softmax_scale`、`window_size`、`cache_seqlens`、`max_seqlen_q/k` | attr / attr_tuple |
 | 索引张量 | `cu_seqlens_q/k`、`page_table`、`seqused_k`（`int32`，`max_length: 4096`） | 真实取值由钩子写死 |
-| 用例条数 | `dtype_numbers: 100`（CANN）/ `25`（CPU、GPU 标杆） | 总条数 = `max(各输入的 dtype 个数) × dtype_numbers`；CANN 套件 2 × 100 = **200**，CPU / 双标杆 / 显存三套件 2 × 25 = **50**（bf16 / fp16 各半） |
+| 用例条数 | `dtype_numbers: 100`（CANN）/ `25`（CPU、双标杆）/ `6`（显存，因单条用例已放大到 ≥500MiB） | 总条数 = `max(各输入的 dtype 个数) × dtype_numbers`；CANN 套件 2 × 100 = **200**，CPU / 双标杆 2 × 25 = **50**，显存套件 2 × 6 = **12**（bf16 / fp16 各半） |
 
 **跨输入的 MLA 契约**由 `interfaces/<iface>/generate_<iface>.py` 里的 `after_case_config` 钩子统一改写（显存套件为 `generate_<iface>_mem.py`；这是保证用例合法性的关键）：
 
 - prefill：q/k 末维 192，**摘除 qv**；
 - decode：q 末维 64 + `qv` 末维 512，`Hk = 1`；
 - paged：`page_table` 写连续块，`seqused_k` 与真实 KV 长度对齐；
-- 索引张量统一改为 `int32_fixed`。
+- 索引张量统一改为 `int32_fixed`；
+- 显存套件额外把 fa3 三接口的 decode 序列**钉死**为 BSND `4096` / TND `8192`，令 prefill 与 decode 体积都落在 500~700MiB（见第 7 节第 8 条）。
 
 ### 2.4 用户场景 anchor（与常规用例分开管理）
 
-除上表的生成用例（CANN 套件每接口 200 条，CPU / 双标杆 / 显存三套件每接口 50 条）外，每个接口额外有 **4 条手写用户场景**用例
-（`cases/user_scenarios_<base>.json`；同一条业务场景按 bf16 / fp16 各展开一份，报告单独产出）：
+除上表的生成用例（CANN 套件每接口 200 条，CPU / 双标杆每接口 50 条，显存套件每接口 12 条）外，`single_benchmark_cpu` / `single_benchmark_cann` / `double_benchmark` 的每个接口额外有 **4 条手写用户场景**用例
+（`cases/user_scenarios_<base>.json`；同一条业务场景按 bf16 / fp16 各展开一份，报告单独产出）；**`gpu_mem_compare` 不出用户场景 anchor**（小 shape 的 anchor 与放大后的生成用例口径不一致）：
 
 | memo | 形状 | 说明 |
 |---|---|---|
@@ -190,8 +191,8 @@ atk task -c ../../../single_benchmark_cann/cases/user_scenarios_fa3_func.json \
 | `single_benchmark_cann` | 5 × 200 = 1000 | 5 × 4 = 20 | **1020** |
 | `single_benchmark_cpu` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
 | `double_benchmark` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
-| `gpu_mem_compare` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
-| **合计** | | | **2130** |
+| `gpu_mem_compare` | 7 × 12 = 84 | — （不出用户场景 anchor） | **84** |
+| **合计** | | | **1844** |
 
 ### 2.7 GPU 标杆主机配置（`double_benchmark` / `gpu_mem_compare`）
 
@@ -367,5 +368,6 @@ python docs/test/perf/mla_user_scenarios.py        # 可选：仅打印两个场
 3. **`softmax_scale` 口径不一致**：`perf/mla_user_scenarios.py` 中的 `DEEPSEEK_SOFTMAX_SCALE = 0.14467962580268923` 与其注释「`192 ** -0.5`」对不上（`192 ** -0.5 ≈ 0.0721688`）；ATK 的用户场景用例（`user_scenarios_*.json`）里用的是 `0.07216878364870322`。建议核对 `usershape.txt` 后统一。
 4. **用例数量口径**：`atk` 的用例数来自 `cases/*.json`（`atk case` 的实际产出），`funcs`/`consistency` 来自 pytest 静态统计（`def test_*` × `parametrize` 展开），二者定义不同但都可用 `--collect-only` 复核。
 5. **ATK fp16 用例的精度回落尚未实测**：`execute_*.py` 新增的 `_case_dtype()` 从 `task_result.case_config.inputs` 读取用例配置的 dtype，让标杆路径（ATK 会把 bf16/fp16 输入统一升到 fp32）按原精度回落。该取数路径目前只做了静态核对；若运行期取不到配置 dtype，会兜底为 bf16 —— fp16 用例将被静默降级，**首次跑 ATK 时请抽查一条 fp16 用例确认**。
-6. **CPU / GPU 标杆套件用例已减至 50 条/接口（2026-11-17）**：`single_benchmark_cpu`、`double_benchmark`、`gpu_mem_compare` 的 `dtype_numbers` 均由 100 降为 25（总条数 = `max(各输入的 dtype 个数) × n` = 2 × 25 = 50），以缩短 CPU fp32 / GPU 标杆耗时；仅 `single_benchmark_cann` 保持每接口 200 条。`gen_atk_mla.py` 已同步该值，重建不会回退；三套件的 `cases/all_*.json` 已按新配置重新生成。
+6. **CPU / GPU 标杆套件用例已减至 50 条/接口（2026-11-17）**：`single_benchmark_cpu`、`double_benchmark` 的 `dtype_numbers` 由 100 降为 25（总条数 = `max(各输入的 dtype 个数) × n` = 2 × 25 = 50），以缩短 CPU fp32 / GPU 标杆耗时；仅 `single_benchmark_cann` 保持每接口 200 条（显存套件 `gpu_mem_compare` 因单条用例已放大到 ≥500MiB，进一步降到 6 ⇒ 12 条，见第 8 条）。`gen_atk_mla.py` 已同步该值，重建不会回退；三套件的 `cases/all_*.json` 已按新配置重新生成。
 7. **标杆 `execute_*.py` 的 decode（吸收态）分支已修复（2026-11-17）**：该分支此前漏传 `atten_mask` 且把 `sparse_mode` 写死为 `0`，使 `causal=True` 且 `Sq>1` 的吸收用例被 FIA 按**非 causal** 计算而产生大误差（`single_benchmark_cann` 1000 条中约 40 条）。现所有标杆分支统一对齐 prefill 写法（`atten_mask=mask` + `sparse_mode=3 if causal else 0`），已改 `single_benchmark_cann`、`double_benchmark` 共 10 个 `execute_*.py`（每个含 TND / BSND 两处）；`single_benchmark_cpu`、`gpu_mem_compare` 中的同名分支不参与判定，暂未改动。
+8. **显存对比套件用例放大到「500MiB ≤ 输入+输出 ≤ 700MiB」区间（2026-11-19）**：`gpu_mem_compare` 的显存判据在 `input+output < 500MiB` 时是硬比值 `NPU/GPU ≤ 1.05`，而 NPU MLA kernel 每次调用都申请一块**与输入规模无关**的固定 workspace（`blockDim × 2.75MB`，约 60–70MB），小用例下峰值被该定值主导（比值 15×~1600×）→ 全 fail → 通过率 0%。现把 7 个 `*_mem*.yaml` 的 batch / 序列维放大到单条落在 500MiB~700MiB 以走 L2 豁免通道（末维被 MLA 锁死不能动）：BSND `B=2`、`Sq=Sk∈{7680,8192}`；TND `Tq=Tk∈{14336,16384}`；实测 553MiB ~ 640MiB。因「同一 Sq 下 decode 吸收态体积是 prefill 的 1.73 倍」而区间只有 1.4 倍宽，无法共用同一序列候选；故 fa3 的三个接口（`fa3_func` / `fa3_kvcache` / `fa3_varlen`）的钩子把 decode 的序列长度**钉死**为 BSND `4096` / TND `8192`（约 561MiB），使 **prefill 与 decode（含 `qv`）都能落在区间内**（每接口 12 条里约 5~6 条为 decode）。fa4 仍只出 prefill（官方 FA4 cute 在 SM90 上 dv ≤ 128）。`dtype_numbers` 25→6（每接口 12 条）。同时该套件**不再出用户场景 anchor**（`cases/user_scenarios_*_mem.json` 已删、`run_memory.sh` 第 4 步已去掉）——小 shape 的 anchor 与放大后的用例口径不一致。`gen_atk_mla.py` 已同步（新增 `_MEM_*` 常量、`prefill_only`、钩子 decode 钉长占位 `@@PIN_BSND@@` / `@@PIN_TND@@`、anchor 条件生成），`cases/all_*_mem.json` 已按新配置重生成。

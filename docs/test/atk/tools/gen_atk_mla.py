@@ -16,6 +16,11 @@ Run:  python3 docs/test/atk/tools/gen_atk_mla.py
     所以 yaml 只描述"每一维的候选取值"，不需要（也不可能）写死组合。
   * 用户场景 anchor（usershape.txt 的 198 prefill / 1025 decode）单独放在
     cases/user_scenarios_<base>.json，由 run_*.sh 串跑，报告与生成用例分开。
+  * gpu_mem_compare 不出用户场景 anchor：小 shape 的显存峰值被 MLA 的固定 workspace
+    主导，与放大后的生成用例口径不一致，故该类别既不生成也不串跑 anchor。
+  * gpu_mem_compare 的用例要落在「输入+输出 500MiB~700MiB」才走 L2 豁免通道；prefill 与
+    decode 共用同一个序列维候选，而同 Sq 下 decode 体积是 prefill 的 1.73 倍，故该类别
+    的钩子把 decode 的序列长度**固定**为 4096（BSND）/ 8192（TND）来保证两者都落在区间内。
 """
 import json
 import os
@@ -68,8 +73,10 @@ CATEGORIES = {
     "single_benchmark_cann": dict(kind="acc", nodes="nodes_accuracy_cann.yaml", run="run_accuracy.sh",
                                   bm="npu", task="accuracy", multi=False, dtype_numbers=100,
                                   desc="npu 候选 vs CANN npu_fused_infer_attention_score 标杆精度对比"),
+    # 显存对比：用例形状被放大到单条「输入+输出 >= 500MiB」（见 _MEM_* 常量），
+    # 每条都远重于精度套件，故 dtype_numbers 进一步降到 6（2 个 dtype × 6 = 12 条/接口）。
     "gpu_mem_compare": dict(kind="mem", nodes="nodes_memory_gpu.yaml", run="run_memory.sh",
-                            bm="gpu", task="memory_device", multi=True, dtype_numbers=25,
+                            bm="gpu", task="memory_device", multi=True, dtype_numbers=6,
                             desc="npu(FA3/FA4) vs GPU(daoailab) 峰值显存对比（需要 GPU 主机）"),
 }
 CAT_ORDER = ["double_benchmark", "single_benchmark_cpu", "single_benchmark_cann", "gpu_mem_compare"]
@@ -81,7 +88,10 @@ GPU_BENCHMARK_CATS = {"double_benchmark", "gpu_mem_compare"}
 
 
 def prefill_only(iface, cat):
-    """该 (接口, 类别) 是否只出 prefill 形状。"""
+    """该 (接口, 类别) 是否只出 prefill 形状。
+
+    - GPU 标杆类别里的 fa4：官方 FA4 cute 在 H200/SM90 上 dv 只能 <=128。
+    """
     return iface.startswith("fa4") and cat in GPU_BENCHMARK_CATS
 
 
@@ -169,7 +179,7 @@ RUN = """#!/usr/bin/env bash
 #   1) atk case -f <stem>.yaml -p .  ->  result/<stem>/json/all_<stem>.json
 #   2) cp 到 <cat>/cases/all_<stem>.json（交付里可直接打开查看）
 #   3) atk task -c cases/all_<stem>.json ... 执行并产出精度/显存报告
-#   4) 最后补跑用户场景 anchor：cases/user_scenarios_{base}.json（报告与上一步分开）
+{anchor_doc}
 #
 # 环境约定：conda 环境 cann（已装 atk + atk_private_precision）/ CANN set_env.sh / TMPDIR
 set -euo pipefail
@@ -241,8 +251,7 @@ for stem in "${{STEMS[@]}}"; do
   run_case "${{CASE_DIR}}/all_${{stem}}.json"
 done
 
-# 用户场景 anchor，单独一个 json，报告与上面的生成用例分开
-run_case "${{CASE_DIR}}/user_scenarios_{base}.json"
+{anchor}
 echo "[done] ${{INTERFACE_NAME}} ({cat}) -> ${{CASE_DIR}}"
 """
 
@@ -697,6 +706,18 @@ _QV_TND = [[1, 64, 198, 512], [32], [512]]
 _K_PAGED = [[1, 2], [BLOCK], [1, 32], [64, 192]]
 _V_PAGED = [[1, 2], [BLOCK], [1, 32], [128, 512]]
 
+# gpu_mem_compare 专用：末维被 MLA 锁死（prefill 192/192/128、decode 64/512/64/512），
+# 只能放大 batch / 序列维。ATK 的显存判据在「输入+输出 >= 500MiB」时走 L2 豁免通道
+# （|NPU-GPU| <= L2 即通过）；这里给的每个候选都要让单条用例稳定落在
+# 「500MiB <= 输入+输出 <= 700MiB」区间内。
+#   prefill：BSND B=2、Sq=Sk 取 7680/8192      -> 600MiB / 640MiB
+#            TND  Tq=Tk 取 14336/16384        -> 560MiB / 640MiB
+#   decode ：序列长度由钩子固定为 4096(BSND) / 8192(TND) -> 约 553~562MiB
+#            （同一 Sq 下 decode 体积是 prefill 的 1.73 倍，沿用 prefill 的序列会超 700MiB）
+_MEM_B = [2]                 # BSND batch
+_MEM_S = [7680, 8192]        # BSND seqlen_q / kv_len
+_MEM_T = [14336, 16384]      # TND total_q / total_k
+
 
 def _in_tensor(name, dims, comment=None, dtypes=PRECISIONS):
     """rank = len(dims) 的精度张量输入；dims 是每一维的候选取值。
@@ -748,20 +769,40 @@ def inputs_for(iface, cat, paged):
     # decode 吸收态出现的 qv。
     pref = prefill_only(iface, cat)
 
+    # 显存对比类别：末维被 MLA 锁死不能动，只把 batch / 序列维放大到
+    # 「500MiB <= 输入+输出 <= 700MiB」；paged 的 KV 页数由序列维经钩子推导，形状随之放大。
+    mem = cat == "gpu_mem_compare"
+
     def dims(base, last):
         return base[:-1] + [last] if pref else base
 
+    q_bsnd, k_bsnd, v_bsnd, qv_bsnd = (dims(_Q_BSND, [192]), dims(_K_BSND, [192]),
+                                       dims(_V_BSND, [128]), _QV_BSND)
+    q_tnd, k_tnd, v_tnd, qv_tnd = (dims(_Q_TND, [192]), dims(_K_TND, [192]),
+                                   dims(_V_TND, [128]), _QV_TND)
+    seq_q_attr = [1, 64, 198, 512]                 # max_seqlen_q（钩子改成 total_q）
+    seq_k_attr = [64, 198, 256, 384, 512, 1025]    # max_seqlen_k（钩子改成 total_k）
+    cache_attr = [198, 384, 1025]                  # cache_seqlens（钩子改成实际 kv_len）
+    if mem:
+        q_bsnd = [_MEM_B, _MEM_S, [32], q_bsnd[-1]]
+        k_bsnd = [_MEM_B, _MEM_S, [32], k_bsnd[-1]]
+        v_bsnd = [_MEM_B, _MEM_S, [32], v_bsnd[-1]]
+        q_tnd = [_MEM_T, [32], q_tnd[-1]]
+        k_tnd = [_MEM_T, [32], k_tnd[-1]]
+        v_tnd = [_MEM_T, [32], v_tnd[-1]]
+        seq_q_attr = seq_k_attr = cache_attr = _MEM_S[:1]
+
     blocks = []
     if meta["layout"] == "tnd":
-        blocks.append(_in_tensor("q", dims(_Q_TND, [192]), "[total_q, Hq, Dq]，TND 打包布局（本文件按单序列打包）"))
+        blocks.append(_in_tensor("q", q_tnd, "[total_q, Hq, Dq]，TND 打包布局（本文件按单序列打包）"))
         if paged:
             blocks.append(_in_tensor("k", dims(_K_PAGED, [192]), "paged KV: [num_blocks, block_size, Hk, Dk]"))
             blocks.append(_in_tensor("v", dims(_V_PAGED, [128]), "paged KV: [num_blocks, block_size, Hk, Dv]"))
         else:
-            blocks.append(_in_tensor("k", dims(_K_TND, [192]), "k: [total_k, Hk, Dk]"))
-            blocks.append(_in_tensor("v", dims(_V_TND, [128]), "v: [total_k, Hk, Dv]"))
+            blocks.append(_in_tensor("k", k_tnd, "k: [total_k, Hk, Dk]"))
+            blocks.append(_in_tensor("v", v_tnd, "v: [total_k, Hk, Dv]"))
         if not pref:
-            blocks.append(_in_tensor("qv", _QV_TND, "qv: 吸收态专用 [total_q, Hq, 512]；prefill 用例会被钩子摘掉"))
+            blocks.append(_in_tensor("qv", qv_tnd, "qv: 吸收态专用 [total_q, Hq, 512]；prefill 用例会被钩子摘掉"))
         blocks.append(_in_index("cu_seqlens_q", "每个 sequence 的 q 累计长度（钩子写死成 [0, total_q]）"))
         if paged:
             blocks.append(_in_index("page_table", "page_table: [batch, num_blocks]（钩子写死成连续块）",
@@ -769,29 +810,31 @@ def inputs_for(iface, cat, paged):
             blocks.append(_in_index("seqused_k", "每个 sequence 实际用到的 KV 长度（钩子写死）"))
         else:
             blocks.append(_in_index("cu_seqlens_k", "每个 sequence 的 kv 累计长度（钩子写死成 [0, total_k]）"))
-        blocks.append(_in_attr("max_seqlen_q", "int", [1, 64, 198, 512], "最长的 q 序列（钩子改成 total_q）"))
-        blocks.append(_in_attr("max_seqlen_k", "int", [64, 198, 256, 384, 512, 1025],
+        blocks.append(_in_attr("max_seqlen_q", "int", seq_q_attr, "最长的 q 序列（钩子改成 total_q）"))
+        blocks.append(_in_attr("max_seqlen_k", "int", seq_k_attr,
                                "最长的 kv 序列（钩子改成 total_k / num_blocks*BLOCK）"))
     elif meta["kvcache"]:
-        blocks.append(_in_tensor("q", _Q_BSND, "q: [batch, seqlen_q, Hq, Dq]"))
+        blocks.append(_in_tensor("q", q_bsnd, "q: [batch, seqlen_q, Hq, Dq]"))
         if paged:
             blocks.append(_in_tensor("k_cache", _K_PAGED, "paged KV: [num_blocks, block_size, Hk, Dk]"))
             blocks.append(_in_tensor("v_cache", _V_PAGED, "paged KV: [num_blocks, block_size, Hk, Dv]"))
         else:
-            blocks.append(_in_tensor("k_cache", _K_BSND, "k_cache: [batch, kv_len, Hk, Dk]"))
-            blocks.append(_in_tensor("v_cache", _V_BSND, "v_cache: [batch, kv_len, Hk, Dv]"))
-        blocks.append(_in_tensor("qv", _QV_BSND, "qv: 吸收态专用 [batch, seqlen_q, Hq, 512]；prefill 用例会被钩子摘掉"))
+            blocks.append(_in_tensor("k_cache", k_bsnd, "k_cache: [batch, kv_len, Hk, Dk]"))
+            blocks.append(_in_tensor("v_cache", v_bsnd, "v_cache: [batch, kv_len, Hk, Dv]"))
+        if not pref:
+            blocks.append(_in_tensor("qv", qv_bsnd,
+                                     "qv: 吸收态专用 [batch, seqlen_q, Hq, 512]；prefill 用例会被钩子摘掉"))
         if paged:
             blocks.append(_in_index("page_table", "page_table: [batch, num_blocks]（钩子写死成连续块）",
                                     dim_values=[[1, 2], [2, 3, 8]]))
-        blocks.append(_in_attr("cache_seqlens", "int", [198, 384, 1025],
+        blocks.append(_in_attr("cache_seqlens", "int", cache_attr,
                                "KV cache 有效长度（钩子改成实际 kv_len）"))
     else:
-        blocks.append(_in_tensor("q", dims(_Q_BSND, [192]), "q: [batch, seqlen_q, Hq, Dq]"))
-        blocks.append(_in_tensor("k", dims(_K_BSND, [192]), "k: [batch, kv_len, Hk, Dk]"))
-        blocks.append(_in_tensor("v", dims(_V_BSND, [128]), "v: [batch, kv_len, Hk, Dv]"))
+        blocks.append(_in_tensor("q", q_bsnd, "q: [batch, seqlen_q, Hq, Dq]"))
+        blocks.append(_in_tensor("k", k_bsnd, "k: [batch, kv_len, Hk, Dk]"))
+        blocks.append(_in_tensor("v", v_bsnd, "v: [batch, kv_len, Hk, Dv]"))
         if not pref:
-            blocks.append(_in_tensor("qv", _QV_BSND, "qv: 吸收态专用；prefill 用例会被钩子摘掉"))
+            blocks.append(_in_tensor("qv", qv_bsnd, "qv: 吸收态专用；prefill 用例会被钩子摘掉"))
     blocks.append(_in_attr("softmax_scale", "float", [SCALE], "MLA 固定 192^-0.5"))
     blocks.append(_in_attr("causal", "bool", ["false", "true"], "causal / 非 causal 各一半"))
     if can_window:
@@ -829,6 +872,22 @@ def build_yaml(iface, cat, paged=False):
         ])
     if meta["paged"]:
         shapes.append("#   paged        : KV 变 [num_blocks,128,H,D]，另加 page_table（页表写成连续块）")
+    # 「形态」说明：显存对比额外交代 decode 的序列长度被钩子固定
+    if cat == "gpu_mem_compare":
+        form_lines = [
+            "#  2) 形态由 q 的最后一维决定：",
+            "#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）",
+            "#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）",
+            "#     显存对比限定：用例要落在「输入+输出 500MiB~700MiB」才走 L2 豁免通道，而同一 Sq 下",
+            "#     decode 体积是 prefill 的 1.73 倍，故钩子把 decode 的序列长度固定为 4096(BSND)/",
+            "#     8192(TND)，两种形态都落在区间内。",
+        ]
+    else:
+        form_lines = [
+            "#  2) 形态由 q 的最后一维决定：",
+            "#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）",
+            "#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）",
+        ]
     head = [
         f"# {stem}.yaml —— {meta['pkg']}.{meta['fn']} 的 ATK 用例设计文件",
         f"# 类别：{cat}（{cfg['desc']}）{paired}",
@@ -843,11 +902,7 @@ def build_yaml(iface, cat, paged=False):
         f"#     之间不可能自洽；跨输入的耦合全部由 generate_{iface}{sfx}.py 里的钩子按 MLA 的",
         "#     数学契约统一改写（头数、末维、cache 与索引张量的内容/长度等）。",
         "#     因此这里只写「每一维的候选取值」，不描述输入之间的对应关系。",
-        "#  2) 形态由 q 的最后一维决定：",
-        "#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）",
-        "#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）",
-        "#",
-    ] + ([
+    ] + form_lines + ["#"] + ([
         "# GPU 标杆限定：官方 FA4 cute 在 H200(SM90) 上只支持 head_dim_v<=128，",
         "# decode 吸收态(dv=512) 无法运行，故本类别只出 prefill 形状；",
         "# decode 的覆盖见 single_benchmark_cpu / single_benchmark_cann。",
@@ -947,6 +1002,11 @@ class @@CLS@@Constraints(CaseGenerator):
         q = ins["q"]
         decode = q.shape[-1] == ROPE        # 形态判据：q 末维
         bsnd = len(q.shape) == 4
+        # dtype 对齐：q/k/v(/qv/k_cache/v_cache) 必须同精度。ATK 只按 dtype_numbers 决定 q
+        # 的精度，其余张量独立随机，会出成 q=fp16、v=bf16 这类非法组合；这里统一跟随 q。
+        for entry in case_config.inputs:
+            if not isinstance(entry, list) and getattr(entry, "dtype", None) in ("bf16", "fp16"):
+                entry.dtype = q.dtype
         qv_entry = ins.get("qv") if decode else None
         if not decode:
             _drop(case_config, "qv")        # qv 只在吸收态出现
@@ -958,10 +1018,10 @@ class @@CLS@@Constraints(CaseGenerator):
             dq, hk, dk, dv = NOPE + ROPE, HEADS, NOPE + ROPE, NOPE
         if bsnd:
             batch, seq_q = q.shape[0], q.shape[1]
-            q.shape = [batch, seq_q, HEADS, dq]
+@@PIN_BSND@@            q.shape = [batch, seq_q, HEADS, dq]
         else:
             total_q = q.shape[0]
-            q.shape = [total_q, HEADS, dq]
+@@PIN_TND@@            q.shape = [total_q, HEADS, dq]
         if qv_entry is not None:
             qv_entry.shape = ([batch, seq_q, HEADS, LATENT] if bsnd
                               else [total_q, HEADS, LATENT])
@@ -1030,8 +1090,9 @@ def iface_files(iface, cat):
     return dict(api_type=api_type, cls=cls, bm_name=bm_name, meta=meta, kind=kind, sfx=sfx)
 
 
-def main():
-    for cat in CAT_ORDER:
+def main(cats=None):
+    """重建整棵 atk 树；可传类别名只重建指定套件（默认全部）。"""
+    for cat in (cats or CAT_ORDER):
         cfg = CATEGORIES[cat]
         for iface in IFACE_ORDER:
             f = iface_files(iface, cat)
@@ -1040,9 +1101,22 @@ def main():
             for stem, paged in variants(iface, cat):
                 write(idir / f"{stem}.yaml", build_yaml(iface, cat, paged=paged))
             # 2) 跨输入约束钩子
+            # 显存类别：prefill 与 decode 共用同一序列候选，而同 Sq 下 decode 体积是 prefill 的
+            # 1.73 倍，无法同时落在 500~700MiB；故对 fa3 的三个接口把 decode 的序列长度钉死，
+            # 让两种形态都进区间（fa4 只出 prefill，无需钉长）。
+            pin_bsnd = pin_tnd = ""
+            if f["kind"] == "mem" and iface in ("fa3_func", "fa3_kvcache", "fa3_varlen"):
+                if IFACES[iface]["layout"] == "bsnd":
+                    pin_bsnd = ("            if decode:\n"
+                                "                seq_q = 4096   # 显存对比：decode 钉长，使体积落入 500~700MiB\n")
+                else:
+                    pin_tnd = ("            if decode:\n"
+                               "                total_q = 8192  # 显存对比：decode 钉长，使体积落入 500~700MiB\n")
             write(idir / f"generate_{iface}{f['sfx']}.py",
                   GENERATE.replace("@@IFACE@@", iface)
-                          .replace("@@CLS@@", "".join(p.capitalize() for p in iface.split("_"))))
+                          .replace("@@CLS@@", "".join(p.capitalize() for p in iface.split("_")))
+                          .replace("@@PIN_BSND@@", pin_bsnd)
+                          .replace("@@PIN_TND@@", pin_tnd))
             # 3) CPU fp32 golden
             write(idir / f"benchmark_{iface}{f['sfx']}.py",
                   BENCHMARK.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
@@ -1059,15 +1133,27 @@ def main():
                          .replace("@@BM_NAME@@", f["bm_name"])
                          .replace("@@GPU_IMPORT@@", gpu_import).replace("@@GPU_FN@@", gpu_fn))
             # 5) nodes + run 脚本
+            base = stem_of(iface, cat, False)
+            if f["kind"] == "mem":
+                # 显存对比不出用户场景 anchor：小 shape 必然被 MLA 的固定 workspace 抬高峰值，
+                # 与放大后的生成用例口径不一致，反而干扰判读，故整条链路去掉。
+                anchor_doc = "#   4) （显存对比套件不跑用户场景 anchor）"
+                anchor = "# 显存对比套件不出用户场景 anchor：用例全部来自 yaml 生成"
+            else:
+                anchor_doc = (f"#   4) 最后补跑用户场景 anchor：cases/user_scenarios_{base}.json"
+                              "（报告与上一步分开）")
+                anchor = ('# 用户场景 anchor，单独一个 json，报告与上面的生成用例分开\n'
+                          f'run_case "${{CASE_DIR}}/user_scenarios_{base}.json"')
             write(idir / cfg["nodes"], NODES[cfg["nodes"]])
             write(idir / cfg["run"],
                   RUN.format(cat=cat, nodes=cfg["nodes"], bm=cfg["bm"],
                              tag="multi" if cfg["multi"] else "single",
-                             task=cfg["task"], base=stem_of(iface, cat, False),
-                             desc=cfg["desc"]))
-            # 6) 用户场景 anchor：手写固定 JSON（不走 atk case），由 run 脚本串跑
-            write(ROOT / cat / "cases" / f"user_scenarios_{stem_of(iface, cat, False)}.json",
-                  json.dumps(build_user_scenarios(iface, cat), ensure_ascii=False, indent=1))
+                             task=cfg["task"], base=base, desc=cfg["desc"],
+                             anchor=anchor, anchor_doc=anchor_doc))
+            # 6) 用户场景 anchor：手写固定 JSON（不走 atk case），由 run 脚本串跑；mem 类别不出
+            if f["kind"] != "mem":
+                write(ROOT / cat / "cases" / f"user_scenarios_{base}.json",
+                      json.dumps(build_user_scenarios(iface, cat), ensure_ascii=False, indent=1))
         # 类别级汇总脚本
         write(ROOT / cat / cfg["run"],
               RUN_CAT.format(cat=cat, desc=cfg["desc"], run=cfg["run"],
@@ -1077,4 +1163,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1:] or None)

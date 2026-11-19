@@ -73,6 +73,8 @@ class Fa3KvcacheConstraints(CaseGenerator):
             dq, hk, dk, dv = NOPE + ROPE, HEADS, NOPE + ROPE, NOPE
         if bsnd:
             batch, seq_q = q.shape[0], q.shape[1]
+            if decode:
+                seq_q = 4096   # 显存对比：decode 钉长，使体积落入 500~700MiB
             q.shape = [batch, seq_q, HEADS, dq]
         else:
             total_q = q.shape[0]

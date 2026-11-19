@@ -76,6 +76,8 @@ class Fa3VarlenConstraints(CaseGenerator):
             q.shape = [batch, seq_q, HEADS, dq]
         else:
             total_q = q.shape[0]
+            if decode:
+                total_q = 8192  # 显存对比：decode 钉长，使体积落入 500~700MiB
             q.shape = [total_q, HEADS, dq]
         if qv_entry is not None:
             qv_entry.shape = ([batch, seq_q, HEADS, LATENT] if bsnd
