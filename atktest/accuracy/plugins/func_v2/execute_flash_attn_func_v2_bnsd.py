@@ -30,6 +30,16 @@ def _bnsd_view(tensor):
 
 @register("flash_attn_func_v2_bnsd_accuracy")
 class FlashAttnFuncV2BnsdApi(BaseApi):
+    def init_by_input_data(self, input_data):
+        """ATK 在 to_device 之后、内存采样之前回调：NPU 上只做一次 BNSD 布局转换。
+
+        避免每轮 forward 都执行 ``.contiguous()``，额外多分配一份 BNSD 内存。
+        """
+        if self.device == "npu":
+            for name in ("q", "k", "v"):
+                input_data.kwargs[name] = _bnsd_view(input_data.kwargs[name])
+        return input_data
+
     def __call__(self, input_data, with_output=False):
         kwargs = dict(input_data.kwargs)
         if self.device == "cpu":
@@ -52,8 +62,6 @@ class FlashAttnFuncV2BnsdApi(BaseApi):
                 name: value.to(f"npu:{self.device_id}") if isinstance(value, torch.Tensor) else value
                 for name, value in kwargs.items()
             }
-            for name in ("q", "k", "v"):
-                kwargs[name] = _bnsd_view(kwargs[name])
             if os.environ.get("FA_ATK_USE_SCHEDULER_METADATA", "1") != "0":
                 return flash_attn_func(**kwargs)
             original = interface.get_scheduler_metadata

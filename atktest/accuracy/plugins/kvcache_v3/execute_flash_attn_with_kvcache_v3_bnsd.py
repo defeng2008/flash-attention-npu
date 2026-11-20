@@ -29,6 +29,16 @@ def _bnsd_view(tensor):
 
 @register("flash_attn_with_kvcache_v3_bnsd_accuracy")
 class FlashAttnWithKvCacheV3BnsdApi(BaseApi):
+    def init_by_input_data(self, input_data):
+        """ATK 在 to_device 之后、内存采样之前回调：NPU 上只做一次 BNSD 布局转换。
+
+        避免每轮 forward 都执行 ``.contiguous()``，额外多分配一份 BNSD 内存。
+        """
+        if self.device == "npu":
+            for name in ("q", "k_cache", "v_cache"):
+                input_data.kwargs[name] = _bnsd_view(input_data.kwargs[name])
+        return input_data
+
     def __call__(self, input_data, with_output=False):
         kwargs = dict(input_data.kwargs)
         if self.device == "cpu":
@@ -99,7 +109,5 @@ class FlashAttnWithKvCacheV3BnsdApi(BaseApi):
                 )
             else:
                 kwargs["scheduler_metadata"] = None
-            for name in ("q", "k_cache", "v_cache"):
-                kwargs[name] = _bnsd_view(kwargs[name])
             return flash_attn_with_kvcache(**kwargs)
         raise RuntimeError(f"Unsupported backend: {self.device}")

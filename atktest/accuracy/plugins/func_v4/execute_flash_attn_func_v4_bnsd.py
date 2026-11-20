@@ -28,6 +28,16 @@ def _bnsd_view(tensor):
 
 @register("flash_attn_func_v4_bnsd_accuracy")
 class FlashAttnFuncV4BnsdApi(BaseApi):
+    def init_by_input_data(self, input_data):
+        """ATK 在 to_device 之后、内存采样之前回调：NPU 上只做一次 BNSD 布局转换。
+
+        避免每轮 forward 都执行 ``.contiguous()``，额外多分配一份 BNSD 内存。
+        """
+        if self.device == "npu":
+            for name in ("q", "k", "v"):
+                input_data.kwargs[name] = _bnsd_view(input_data.kwargs[name])
+        return input_data
+
     def __call__(self, input_data, with_output=False):
         kwargs = dict(input_data.kwargs)
         if self.device == "cpu":
@@ -53,7 +63,5 @@ class FlashAttnFuncV4BnsdApi(BaseApi):
                 name: value.to(f"npu:{self.device_id}") if isinstance(value, torch.Tensor) else value
                 for name, value in kwargs.items()
             }
-            for name in ("q", "k", "v"):
-                kwargs[name] = _bnsd_view(kwargs[name])
             return flash_attn_func(**kwargs)
         raise RuntimeError(f"Unsupported backend: {self.device}")
