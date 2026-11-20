@@ -57,7 +57,12 @@ def ref_flash_attention(query, key, value, scale, mask, data_type, softcap=0.0):
         if softcap > 0.0:
             qk_result = softcap * torch.tanh(qk_result / softcap)
         if mask is not None:
-            qk_result += mask[:query.shape[1], kv_start:kv_start + sub_key.shape[2]].to(interm_dtype) * -1e4
+            # Mask with -inf instead of a fixed -1e4: large-value ranges and
+            # outliers push qk logits far past 1e4, so the constant no longer
+            # suppresses the masked entries.
+            qk_result = qk_result.masked_fill(
+                mask[:query.shape[1], kv_start:kv_start + sub_key.shape[2]], float("-inf")
+            )
         p_result, row_sum, dm, gm = softmax1(qk_result, kv_start == 0, gm, interm_dtype)
         lo = pvMM2(p_result.to(data_type), sub_value).to(interm_dtype)
         if kv_start == 0:
