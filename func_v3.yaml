@@ -1,0 +1,249 @@
+name: flash_attn_npu_3.flash_attn_func
+api: pytorch
+api_type: flash_attn_func_v3_bnsd_accuracy
+version: v2.1
+generate: flash_attn_func_v3_bnsd_constraints
+dtype_numbers: 700
+# 8 per dtype * {fp16, bf16} = 16 cases; boundary extras carry no BNSD shape.
+extra_numbers: 0
+outputs: 1
+standard:
+  acc:
+    cv_fused_double_benchmark:
+      max_re_ratio: 2.0
+      avg_re_ratio: 1.2
+      root_mean_squared_ratio: 1.2
+  perf: [0.95,0.95]
+shape_distributions: [[0, 1.0]]
+inputs:
+  - name: q
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2,4,8,9,16,32,64,99,128,256]
+        - values: [2, 8,9,16,32, 64,99,128,256]
+        - values: [2, 4, 8]
+        - values: [8,16, 32, 64, 128]
+      max_length: 33554432
+    ranges:
+      valid:
+        random_types:
+          - name: nd # 表示数据随机类型，default代表均值随机，nd代表正态分布随机
+            mean: [ -100, 100 ]
+            std: [ 1, 25 ]
+          - name: default
+        values: [ [ -0.001, 0.001 ], [ -5, 5 ] ]  # 均匀分布可选的范围
+        custom_dist_ratio: [ [ 0.1, 0.3, 0.1 ], [ 0.4, 0.1 ] ]  # 表示自定义分布比例中,各分布的占比
+    outlier_values: [ 0.001, 1000 ]  # 离群点配置，第一个表示概率，第二个表示放大倍数
+    boundary:
+      has_empty: false
+      has_infnan: true
+      has_scalar: false
+      has_upper_border: false
+      has_lower_border: true
+  - name: k
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2,4,8,9,16,32,64,99,128,256]
+        - values: [2, 8,9,16,32, 64,99,128,256]
+        - values: [2, 4, 8]
+        - values: [8,16, 32, 64, 128]
+      max_length: 33554432
+    ranges:
+      valid:
+        random_types:
+          - name: nd # 表示数据随机类型，default代表均值随机，nd代表正态分布随机
+            mean: [ -100, 100 ]
+            std: [ 1, 25 ]
+          - name: default
+        values: [ [ -0.001, 0.001 ], [ -5, 5 ] ]  # 均匀分布可选的范围
+        custom_dist_ratio: [ [ 0.1, 0.3, 0.1 ], [ 0.4, 0.1 ] ]  # 表示自定义分布比例中,各分布的占比
+    outlier_values: [ 0.001, 1000 ]  # 离群点配置，第一个表示概率，第二个表示放大倍数
+    boundary:
+      has_empty: false
+      has_infnan: true
+      has_scalar: false
+      has_upper_border: false
+      has_lower_border: true
+  - name: v
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2,4,8,9,16,32,64,99,128,256]
+        - values: [2, 8,9,16,32, 64,99,128,256]
+        - values: [2, 4, 8]
+        - values: [8,16, 32, 64, 128]
+      max_length: 33554432
+    ranges:
+      valid:
+        random_types:
+          - name: nd # 表示数据随机类型，default代表均值随机，nd代表正态分布随机
+            mean: [ -100, 100 ]
+            std: [ 1, 25 ]
+          - name: default
+        values: [ [ -0.001, 0.001 ], [ -5, 5 ] ]  # 均匀分布可选的范围
+        custom_dist_ratio: [ [ 0.1, 0.3, 0.1 ], [ 0.4, 0.1 ] ]  # 表示自定义分布比例中,各分布的占比
+    outlier_values: [ 0.001, 1000 ]  # 离群点配置，第一个表示概率，第二个表示放大倍数
+    boundary:
+      has_empty: false
+      has_infnan: true
+      has_scalar: false
+      has_upper_border: false
+      has_lower_border: true
+  - name: softmax_scale
+    type: attr
+    required: false
+    dtypes:
+      values: [float]
+    ranges:
+      valid:
+        values: [0.125]
+  - name: causal
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false, true]
+  - name: qv
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2]
+        - values: [2, 8, 64]
+        - values: [2, 4, 8]
+        - values: [16, 32, 64, 128]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [default]
+    boundary:
+      has_empty: false
+      has_infnan: false
+      has_scalar: false
+      has_upper_border: false
+      has_lower_border: false
+  - name: q_descale
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 32
+    ranges:
+      valid:
+        values: [default]
+  - name: k_descale
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 32
+    ranges:
+      valid:
+        values: [default]
+  - name: v_descale
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 32
+    ranges:
+      valid:
+        values: [default]
+  - name: window_size
+    type: attr_tuple
+    required: false
+    tuple_numbers:
+      values: [2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [-1]
+  - name: attention_chunk
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [0]
+  - name: softcap
+    type: attr
+    required: false
+    dtypes:
+      values: [float]
+    ranges:
+      valid:
+        values: [0.0]
+  - name: num_splits
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [1]
+  - name: pack_gqa
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]
+  - name: deterministic
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]
+  - name: sm_margin
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [0]
+  - name: return_attn_probs
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]
