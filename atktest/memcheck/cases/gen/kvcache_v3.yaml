@@ -1,0 +1,367 @@
+name: flash_attn_npu_3.flash_attn_with_kvcache
+api: pytorch
+api_type: flash_attn_with_kvcache_v3_accuracy
+version: v2.1
+generate: flash_attn_with_kvcache_v3_constraints
+dtype_numbers: 100
+outputs: 1
+standard:
+  acc:
+    cv_fused_double_benchmark:
+      max_re_ratio: 2.0
+      avg_re_ratio: 1.2
+      root_mean_squared_ratio: 1.2
+  perf: not_key
+shape_distributions: [[0, 1.0]]
+inputs:
+  - name: q
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 8, 16, 32]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  - name: k_cache
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [16, 32, 64, 96, 128, 256]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 16777216
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  - name: v_cache
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [16, 32, 64, 96, 128, 256]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 16777216
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  - name: k
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [default]
+  - name: v
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [default]
+  - name: qv
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp16, bf16]
+    shapes:
+      dim_numbers:
+        values: [4]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4, 8, 16, 32]
+        - values: [1, 2, 4, 8, 16]
+        - values: [16, 32, 64, 128, 256]
+      max_length: 8388608
+    ranges:
+      valid:
+        values: [default]
+  - name: rotary_cos
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [2]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [default]
+  - name: rotary_sin
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [2]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [default]
+  - name: cache_seqlens
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 16
+    ranges:
+      valid:
+        values: [[1, 65]]
+  - name: cache_batch_idx
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 16
+    ranges:
+      valid:
+        values: [default]
+  - name: cache_leftpad
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 16
+    ranges:
+      valid:
+        values: [default]
+  - name: page_table
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [2]
+      dim_values:
+        - values: [1, 2, 4, 8]
+        - values: [1, 2, 4]
+      max_length: 256
+    ranges:
+      valid:
+        values: [[0, 15], default]
+  - name: cu_seqlens_q
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 16
+    ranges:
+      valid:
+        values: [default]
+  - name: cu_seqlens_k_new
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 16
+    ranges:
+      valid:
+        values: [default]
+  - name: max_seqlen_q
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [default]
+  - name: rotary_seqlens
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 16
+    ranges:
+      valid:
+        values: [default]
+  - name: q_descale
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 32
+    ranges:
+      valid:
+        values: [default]
+  - name: k_descale
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 32
+    ranges:
+      valid:
+        values: [default]
+  - name: v_descale
+    type: tensor
+    required: false
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [1]
+      max_length: 32
+    ranges:
+      valid:
+        values: [default]
+  - name: softmax_scale
+    type: attr
+    required: false
+    dtypes:
+      values: [float]
+    ranges:
+      valid:
+        values: [0.125]
+  - name: causal
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false, true]
+  - name: window_size
+    type: attr_tuple
+    required: false
+    tuple_numbers:
+      values: [2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [-1]
+  - name: attention_chunk
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [0]
+  - name: softcap
+    type: attr
+    required: false
+    dtypes:
+      values: [float]
+    ranges:
+      valid:
+        values: [0.0]
+  - name: rotary_interleaved
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [true]
+  - name: scheduler_metadata
+    type: tensor
+    required: false
+    dtypes:
+      values: [int32]
+    shapes:
+      dim_numbers:
+        values: [2]
+      max_length: 256
+    ranges:
+      valid:
+        values: [default]
+  - name: num_splits
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [0]
+  - name: pack_gqa
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]
+  - name: sm_margin
+    type: attr
+    required: false
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [0]
+  - name: return_softmax_lse
+    type: attr
+    required: false
+    dtypes:
+      values: [bool]
+    ranges:
+      valid:
+        values: [false]

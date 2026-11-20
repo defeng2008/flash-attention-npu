@@ -1,0 +1,19 @@
+# 每个接口 5 条代表性 shape，shape 按 BSND 语义书写：
+#   func    : q=[b, s, h, d]      k/v=[b, s, h_kv, d]
+#   kvcache : q=[b, sq, h, d]     k_cache/v_cache=[b, s_alloc, h_kv, d]
+#               cache_seqlens=[b]，取值 s_alloc
+# BNSD 对照在 msprof/<key>/model_new_ascendc.py 里做 transpose(1,2).contiguous() 物化。
+# 覆盖：序列 1k/4k/8k、batch 1/2/4、fp16/bf16、因果/非因果、GQA 与 MHA。
+func:
+  - {b: 1, s: 1024, h: 32, h_kv: 8, d: 128, dtype: fp16, causal: true}
+  - {b: 1, s: 8192, h: 64, h_kv: 8, d: 128, dtype: bf16, causal: true}
+  - {b: 2, s: 4096, h: 64, h_kv: 8, d: 128, dtype: bf16, causal: true}
+  - {b: 1, s: 4096, h: 64, h_kv: 64, d: 128, dtype: fp16, causal: true}
+  - {b: 1, s: 4096, h: 32, h_kv: 8, d: 128, dtype: fp16, causal: false}
+
+kvcache:
+  - {b: 1, sq: 128, s_alloc: 4096, h: 32, h_kv: 8, d: 128, dtype: fp16, causal: true}
+  - {b: 1, sq: 64, s_alloc: 4096, h: 32, h_kv: 8, d: 128, dtype: fp16, causal: true}
+  - {b: 1, sq: 256, s_alloc: 8192, h: 32, h_kv: 8, d: 128, dtype: bf16, causal: true}
+  - {b: 1, sq: 128, s_alloc: 4096, h: 64, h_kv: 64, d: 128, dtype: fp16, causal: true}
+  - {b: 4, sq: 64, s_alloc: 2048, h: 16, h_kv: 4, d: 128, dtype: bf16, causal: true}

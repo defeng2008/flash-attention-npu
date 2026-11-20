@@ -1,0 +1,1 @@
+{"inputs": [{"name": "query", "type": "tensor", "shape": [1, 128, 64, 128], "dtype": "float16"}, {"name": "key", "type": "tensor", "shape": [1, 4096, 64, 128], "dtype": "float16"}, {"name": "value", "type": "tensor", "shape": [1, 4096, 64, 128], "dtype": "float16"}]}
