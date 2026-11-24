@@ -1,0 +1,6 @@
+左侧为社区 main 的原函数，右侧为在同一份源码上应用补丁后的完整函数。底色标出改动，行号对应各自版本。
+
+csrc/ascend910/flash_attn_npu_3/flash_api.cpp · 基线 8f5ab5c97d
+选流。保留调用时取得的 currentStream，移除从流池取侧流的操作。
+发射。回调捕获 curHandle，用它启动 ComputeFAMetadataV3。调用方在同一流上准备输入、运行 metadata、消费结果，设备按入队顺序执行，原先两次跨流等待可以删除。
+张量生命周期。recordStream 对输出和长度输入登记实际使用它们的流，便于内存分配器安全复用存储。
