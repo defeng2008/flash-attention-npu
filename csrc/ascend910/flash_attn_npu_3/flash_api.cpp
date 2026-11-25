@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -84,6 +85,9 @@ static FwdMaskDerivation DeriveFwdMask(bool causal, int64_t window_left, int64_t
 static bool IsMlaDecodeGemvShape(bool hasQv, int64_t numHeads, int64_t numHeadsK, int64_t headSizeOg, int64_t headSizeV,
                                  bool pagedKv, bool isLocal, bool isCausal, int64_t seqlenQ)
 {
+    if (std::getenv("FLASH_ATTN_DISABLE_MLA_DECODE_GEMV") != nullptr) {
+        return false;
+    }
     return hasQv && (numHeads <= 32) && (numHeadsK == 1) && (headSizeV == 512) && (headSizeOg + headSizeV == 576) &&
            !pagedKv && !isLocal && !isCausal && (seqlenQ == 1);
 }
@@ -481,7 +485,7 @@ std::vector<at::Tensor> mha_fwd(
         }
         int64_t wsBase = static_cast<int64_t>(fa_metadata::WorkSpaceSize(blockDim));
         int64_t wsSplit = 0;
-        if (paged_KV && is_varlen_q && !is_local) {
+        if (seqlen_q == 1 && !is_local) {
             // FD has at most 128 rows per (batch, KV head), and each internal
             // core boundary adds at most 128 partial rows. Independently, each
             // core has at most two partial Q/head tiles. Bound both without
@@ -495,6 +499,22 @@ std::vector<at::Tensor> mha_fwd(
         }
         workspace_tensor = at::empty({wsBase + wsSplit}, at::device(at::kPrivateUse1).dtype(at::kByte));
         launchBlockDim = blockDim;
+        if (!mlaDecodeGemv && seqlen_q == 1 && !is_local) {
+            const uint32_t groupSize = static_cast<uint32_t>(num_heads / num_heads_k);
+            const uint32_t qNBlockTile = fa_split::GetQNBlockTile(1U, groupSize);
+            const uint32_t qNBlocks = (groupSize + qNBlockTile - 1U) / qNBlockTile;
+            const int64_t kvLen = is_varlen_q ? k.size(0) : (is_bnsd ? k.size(2) : k.size(1));
+            const uint32_t kvBlocks =
+                (static_cast<uint32_t>(kvLen) + fa_split::DECODE_KV_STACK_LEN - 1U) /
+                fa_split::DECODE_KV_STACK_LEN;
+            uint32_t kvSegments = 1U;
+            if (num_splits != 1) {
+                kvSegments = num_splits > 1 ? std::min<uint32_t>(num_splits, kvBlocks) : kvBlocks;
+            }
+            const uint32_t tasks = static_cast<uint32_t>(batch_size) * static_cast<uint32_t>(num_heads_k) *
+                                   qNBlocks * kvSegments;
+            launchBlockDim = std::max(1U, std::min(blockDim, tasks));
+        }
     } else {
         at::Tensor tiling_cpu_tensor =
             at::empty({static_cast<int64_t>(sizeof(FAInferTilingData))}, at::device(c10::kCPU).dtype(at::kByte));
@@ -594,11 +614,10 @@ std::vector<at::Tensor> mha_fwd(
         const bool mlaDecodeGemvShape = IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v,
                                                              paged_KV, is_local, is_causal, seqlen_q);
         mlaDecodeGemv = mlaDecodeGemvShape;
-        TORCH_CHECK(num_splits <= 1 || (paged_KV && is_varlen_q) || mlaDecodeGemv,
-                    "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
         flashDecodeFlag =
-            (paged_KV && is_varlen_q && !is_local && (maxQSeqlenCalc * groupSize <= 128) && (maxQSeqlenCalc <= 16) &&
-             (maxKVSeqlenCalc >= 1024) && (minQSeqlenCalc > 0) && (isLongSeq || isShortSeq));
+            (num_splits != 1) && (!paged_KV || is_varlen_q) && !is_local &&
+            (maxQSeqlenCalc * groupSize <= 128) && (maxQSeqlenCalc <= 16) && (maxKVSeqlenCalc >= 1024) &&
+            (minQSeqlenCalc > 0) && (isLongSeq || isShortSeq);
         if (mlaDecodeGemv) {
             // The dedicated kernel has its own KV split; generic FD geometry
             // does not apply.
@@ -735,6 +754,8 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.is_causal = is_causal;
     fwd_args.is_local = is_local;
     fwd_args.has_softcap = has_softcap;
+    fwd_args.skip_lse =
+        seqlen_q == 1 && std::getenv("FLASH_ATTN_BENCH_SKIP_LSE") != nullptr;
     // Host layout codes (0 = TND, 1 = BSND, 2 = BNSD) map onto the kernel enum.
     fwd_args.layout = (layout == 0) ? FaiKenel::inputLayout::TND
                                     : (is_bnsd ? FaiKenel::inputLayout::BNSD : FaiKenel::inputLayout::BSND);
@@ -809,8 +830,6 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
     TORCH_CHECK(num_splits >= 0 && num_splits <= static_cast<int64_t>(blockDim),
                 "NPU FlashAttention supports num_splits in [0, ", blockDim,
                 "] (0 = auto; upper bound = number of AI cores). ");
-    TORCH_CHECK(num_splits <= 1 || (page_size.has_value() && is_varlen_q),
-                "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
     FwdMaskDerivation maskDer = DeriveFwdMask(causal, window_size_left, window_size_right, max_seqlen_q, max_seqlen_k);
     FAMetadataArgs args{};
     args.seqlensQAddr = is_varlen_q ? reinterpret_cast<uint64_t>(seqlensQDev) : 0ULL;

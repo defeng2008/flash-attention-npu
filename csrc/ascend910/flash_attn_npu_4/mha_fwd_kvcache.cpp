@@ -285,15 +285,22 @@ class FAInferKernel {
         // D>256: Q resident + K/P shared 2-stage (256-wide slices) + V 2-stage
         // (128-wide slices) = 384 KB of the 512 KB L1 budget.
         const bool headDimSplit = embedQK > NUM_256;
+        const bool compactDecodeL1 =
+            mlaAbsorbed && maxQSeqlen == 1U && embedV == 512U && kvNewSeqlen == 0U;
         // 256-wide slice (dSliceNum 4 -> 2). kPVDyn follows kDyn because the
         // K/P region is shared, and vSegLen follows the PV K chunk.
         uint32_t kDynNum = NUM_256;
         uint32_t nDynNum = NUM_128;
         uint32_t qL1DynNum = RoundUp(embedQK, FaiKenel::BLOCK_SIZE);
         uint32_t kPVDynNum = NUM_256;
-        uint32_t vL1Stages = DOUBLE_BUFFER;
+        uint32_t vL1Stages = compactDecodeL1 ? 4U : DOUBLE_BUFFER;
         uint32_t vSegLen = NUM_256;
         uint32_t vSliceWidth = NUM_128;
+        uint32_t qL1Rows = Q_TILE_CEIL;
+        if (compactDecodeL1) {
+            const uint32_t qNBlockTile = GetQNBlockTile(maxQSeqlen, qHeads / kvHeads);
+            qL1Rows = RoundUp(qNBlockTile * maxQSeqlen, FaiKenel::BLOCK_SIZE);
+        }
         if (!headDimSplit) {
             // Preserve the production <=256 layout byte for byte.
             kDynNum = RoundUp(embed, NUM_128);
@@ -311,7 +318,8 @@ class FAInferKernel {
             vSliceWidth = embedV;
         }
 
-        uint32_t L1_QK_SIZE = BlockMmadQK::L1TileShape::M * qL1DynNum * sizeof(ElementQ);
+        uint32_t L1_QK_SIZE = qL1Rows * qL1DynNum * sizeof(ElementQ);
+        uint32_t qkKPoolSize = nDynNum * kDynNum * sizeof(ElementK) * DOUBLE_BUFFER;
         blockMmadQK.SetPingPongState(&pingPongState);
         blockMmadPV.SetPingPongState(&pingPongState);
         // MLA absorbed: QK K source is the latent cache (v), so QK pages
@@ -319,8 +327,9 @@ class FAInferKernel {
         keyPageStride = fARuntimeData->keyPageStride;
         blockMmadQK.SetPageStride(mlaAbsorbed ? fARuntimeData->valuePageStride : fARuntimeData->keyPageStride);
         blockMmadPV.SetPageStride(fARuntimeData->valuePageStride);
-        blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN, 0, qL1DynNum);
-        blockMmadPV.init(resource, nDynNum, kPVDynNum, MAX_KV_STACK_LEN, L1_QK_SIZE, vL1Stages, vSegLen, vSliceWidth);
+        blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN, 0, qL1DynNum, qL1Rows);
+        blockMmadPV.init(resource, nDynNum, kPVDynNum, MAX_KV_STACK_LEN, L1_QK_SIZE, vL1Stages, vSegLen, vSliceWidth,
+                         qkKPoolSize);
 #endif
 #ifdef __DAV_C220_VEC__
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);

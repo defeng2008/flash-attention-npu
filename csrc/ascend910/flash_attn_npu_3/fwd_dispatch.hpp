@@ -44,6 +44,7 @@ struct FwdLaunchArgs {
     bool is_causal;
     bool is_local; // sliding-window attention (MASK_SWA)
     bool has_softcap;
+    bool skip_lse;
     bool mlaDecodeGemv = false;
     KernelCommon::FaiKenel::inputLayout layout; // BSND, TND or BNSD
     // BNSD only: the allocated KV sequence length (S_alloc = k.size(2)), i.e. the

@@ -318,8 +318,8 @@ class FAInferKernel {
         const bool headDimSplit = embedQK > NUM_256;
         groupSize = qHeads / kvHeads;
         const bool compactDecodeL1 =
-            !FLASH_DECODE_FLAG && embed == 512U && embedV == 512U && kvNewSeqlen == 0U && maxQSeqlen * groupSize <= 64U;
-        kvStackLen = MAX_KV_STACK_LEN;
+            !PAGED_CACHE_FLAG && embedV == 512U && kvNewSeqlen == 0U && maxQSeqlen * groupSize <= 64U;
+        kvStackLen = FLASH_DECODE_FLAG ? 384U : MAX_KV_STACK_LEN;
         uint32_t kDynNum = NUM_256;
         uint32_t nDynNum = L1_D512_KV_TILE;
         uint32_t qL1DynNum = RoundUp(embedQK, FaiKenel::BLOCK_SIZE);
@@ -346,9 +346,11 @@ class FAInferKernel {
             vSegLen = kvStackLen;
             vSliceWidth = embedV;
         } else if (compactDecodeL1) {
-            qL1Rows = 64U;
-            pL1Rows = 64U;
+            const uint32_t qNBlockTile = GetQNBlockTile(maxQSeqlen, groupSize);
+            qL1Rows = RoundUp(qNBlockTile * maxQSeqlen, FaiKenel::BLOCK_SIZE);
+            pL1Rows = qL1Rows;
             pL1Stages = 1U;
+            vL1Stages = 4U;
             kPVDynNum = kvStackLen;
         }
 
@@ -372,7 +374,7 @@ class FAInferKernel {
         uint32_t ndCopyL1Offset = compactDecodeL1 ? (vBufOffset + vPoolSize) : (L1_QK_SIZE + kPVPoolSize + vPoolSize);
         blockMmadQK.init(resource, nDynNum, kDynNum, qL1Rows, qL1DynNum, kvStackLen, 0, ndCopyL1Offset);
         if (compactDecodeL1) {
-            blockMmadPV.initCompactDecode(resource, pL1Rows, kvStackLen, pBufOffset, vBufOffset);
+            blockMmadPV.initCompactDecode(resource, pL1Rows, kvStackLen, pBufOffset, vBufOffset, vL1Stages);
         } else {
             blockMmadPV.init(resource, nDynNum, kPVDynNum, kvStackLen, L1_QK_SIZE, vL1Stages, vSegLen, vSliceWidth,
                              ndCopyL1Offset);
@@ -1275,14 +1277,12 @@ __global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_A
     FAIKernelParams params{q,         k,      v,    mask, blockTables, actualQseqlen, actualKvseqlen,    o, lse,
                            workspace, tiling, kNew, vNew, seqUsedQ,    seqUsedKv,     kvSeqlenAllocated, qv};
     // Select the specialization from device metadata.
-    if constexpr (PagedCacheFlag) {
-        if (reinterpret_cast<__gm__ FAInferTilingData*>(tiling.tilingDataAddr)->flashDecodeFlag != 0U) {
-            using FAInferKernelType = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
-                                                    PagedCacheFlag, true, maskCategory, inLayout, CombineScale>;
-            FAInferKernelType flashAttnInfer;
-            flashAttnInfer(params);
-            return;
-        }
+    if (reinterpret_cast<__gm__ FAInferTilingData*>(tiling.tilingDataAddr)->flashDecodeFlag != 0U) {
+        using FAInferKernelType = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
+                                                PagedCacheFlag, true, maskCategory, inLayout, CombineScale>;
+        FAInferKernelType flashAttnInfer;
+        flashAttnInfer(params);
+        return;
     }
     using FAInferKernelType = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
                                             PagedCacheFlag, false, maskCategory, inLayout, CombineScale>;

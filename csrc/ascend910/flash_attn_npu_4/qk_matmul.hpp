@@ -122,17 +122,19 @@ struct BlockMmad<MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
     }
 
     __aicore__ inline void init(Arch::Resource<ArchTag>& resource, uint32_t nDyn, uint32_t kDyn,
-                                uint32_t KVStackLen = 512, uint32_t l1BufAddrStart = 0, uint32_t qDyn = 0)
+                                uint32_t KVStackLen = 512, uint32_t l1BufAddrStart = 0, uint32_t qDyn = 0,
+                                uint32_t qRows = 0)
     {
         maxKVStackLen = KVStackLen;
         // Q is resident for the whole task; qDyn defaults to the KV tile width
         // so the <=256 layout is unchanged.
         const uint32_t qTileWidth = (qDyn == 0U) ? kDyn : qDyn;
+        const uint32_t qTileRows = (qRows == 0U) ? L1TileShape::M : qRows;
         // Allocate L1 memory space
         l1ATensor = resource.l1Buf.template GetBufferByByte<ElementA>(l1BufAddrStart);
         for (uint32_t i = 0; i < STAGES; i++) {
             l1BTensor[i] = resource.l1Buf.template GetBufferByByte<ElementB>(
-                l1BufAddrStart + L1TileShape::M * qTileWidth * sizeof(ElementA) + nDyn * kDyn * sizeof(ElementB) * i);
+                l1BufAddrStart + qTileRows * qTileWidth * sizeof(ElementA) + nDyn * kDyn * sizeof(ElementB) * i);
             l0ATensor[i] = resource.l0ABuf.template GetBufferByByte<ElementA>(L0A_PINGPONG_BUF_SIZE * i);
             l0BTensor[i] = resource.l0BBuf.template GetBufferByByte<ElementB>(L0B_PINGPONG_BUF_SIZE * i);
             l0CTensor[i] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(L0C_PINGPONG_BUF_SIZE * i);

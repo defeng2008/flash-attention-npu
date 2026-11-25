@@ -37,6 +37,7 @@ struct FwdLaunchArgs {
     bool flashDecodeFlag;
     bool has_softcap;
     bool mlaDecodeGemv;
+    bool skip_lse;
     uint8_t* qDevice;
     uint8_t* kDevice;
     uint8_t* vDevice;

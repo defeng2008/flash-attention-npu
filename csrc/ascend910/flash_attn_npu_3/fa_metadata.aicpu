@@ -36,6 +36,9 @@ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
         ? (Q_TILE_CEIL / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER
         : Q_TILE_CEIL;
     qNBlockTile = qNBlockTile < groupSize ? qNBlockTile : groupSize;
+    if (qSeqlen == 1U) {
+        qNBlockTile = qNBlockTile < 16U ? qNBlockTile : 16U;
+    }
     qNBlockTile = qNBlockTile < 1u ? 1u : qNBlockTile;
     return qNBlockTile;
 }
@@ -121,7 +124,8 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
         const uint32_t numTasks = metaArgs->batch * metaArgs->numHeadsK;
         const bool isLongSeq = (static_cast<double>(numTasks) <= 0.8 * bd) && (maxKvSeqlen >= bd * 512u);
         const bool isShortSeq = (static_cast<double>(numTasks) <= 0.4 * bd) && (maxKvSeqlen >= 1024u);
-        const bool fdFlag = (metaArgs->pagedKV != 0) && (metaArgs->isVarlen != 0) &&
+        const bool fdFlag = (metaArgs->numSplits != 1u) &&
+            (metaArgs->pagedKV == 0u || metaArgs->isVarlen != 0u) &&
             (metaArgs->maskType != MASK_TYPE_BAND) &&
             (maxQ * groupSize <= 128u) && (maxQ <= 16u) &&
             (maxKvSeqlen >= 1024u) && (minQ > 0u) && (isLongSeq || isShortSeq);

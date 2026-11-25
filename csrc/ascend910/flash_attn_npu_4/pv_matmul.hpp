@@ -96,11 +96,13 @@ struct BlockMmad<MmadAtlasA2FAIPVT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
 
     __aicore__ inline void init(Arch::Resource<ArchTag>& resource, uint32_t nDyn, uint32_t kDyn,
                                 uint32_t KVStackLen = 512, uint32_t l1BufAddrStart = 0, uint32_t vL1Stages = 0,
-                                uint32_t vSegLen = 0, uint32_t vSliceWidth = 0)
+                                uint32_t vSegLen = 0, uint32_t vSliceWidth = 0, uint32_t l1SharedSize = 0)
     {
         maxKVStackLen = KVStackLen;
         // Allocate L1 memory space
-        const uint32_t vBase = l1BufAddrStart + L1TileShape::M * kDyn * sizeof(ElementA) * STAGES;
+        const uint32_t pPoolSize = L1TileShape::M * kDyn * sizeof(ElementA) * STAGES;
+        const uint32_t sharedPoolSize = (l1SharedSize == 0U) ? pPoolSize : l1SharedSize;
+        const uint32_t vBase = l1BufAddrStart + sharedPoolSize;
         l1BTensor = resource.l1Buf.template GetBufferByByte<ElementB>(vBase);
         // D>256 streams V through a dedicated multi-stage pool; vL1Stages==0
         // keeps the <=256 single resident buffer unchanged.
@@ -156,6 +158,15 @@ struct BlockMmad<MmadAtlasA2FAIPVT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
             blockEnd = stackSeqTile + blockStartOffset;
             curBlockTotalNum = 1;
         }
+    }
+
+    __aicore__ inline uint32_t VEventId(uint32_t stage) const
+    {
+        if (l1VStages == 4U) {
+            constexpr uint32_t eventIds[4] = {2U, 3U, 5U, 6U};
+            return eventIds[stage & 3U];
+        }
+        return 5U + stage;
     }
 
     __aicore__ inline void updateBlockOffset(uint32_t nowLen, uint32_t& curBlockIdx, uint32_t blockSize)
@@ -371,10 +382,11 @@ struct BlockMmad<MmadAtlasA2FAIPVT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
                     copyGmToL1A(l1ATensor[l1PPingPongFlag], gmTileA, layoutAInL1, layoutTileA);
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1PPingPongFlag);
 
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(5U + vStage);
+                    const uint32_t vEventId = VEventId(vStage);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(vEventId);
                     copyVHeadDimSliceToL1(gB, gBlockTable, layoutB, nIdx, blockSize, strideKV, kL1Idx, kL1Actual,
                                           nL1Idx, nL1Actual, vStage);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(5U + vStage);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(vEventId);
 
                     const uint32_t kL0Loop = CeilDiv(kL1Actual, L0TileShape::K);
                     for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; ++kL0Idx) {
@@ -398,12 +410,12 @@ struct BlockMmad<MmadAtlasA2FAIPVT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1Tile
                         LayoutBInL1 layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(kL1Actual, nL1Actual);
                         auto l1BTile = l1VTensor[vStage][layoutBInL1.GetOffset(l1BTileCoord)];
                         if (kL0Idx == 0U) {
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(5U + vStage);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(vEventId);
                         }
                         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag + 2U);
                         copyL1ToL0B(l0BTensor[l0ABPingPongFlag], l1BTile, layoutBInL0, layoutBInL1);
                         if (kL0Idx == kL0Loop - 1U) {
-                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(5U + vStage);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(vEventId);
                         }
 
                         AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);

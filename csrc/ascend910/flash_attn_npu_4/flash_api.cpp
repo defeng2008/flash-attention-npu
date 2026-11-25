@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -82,6 +83,9 @@ static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor
 inline bool IsMlaDecodeGemvShape(bool has_q_v, int64_t num_heads, int64_t num_heads_k, int64_t head_size_og,
                                  int64_t head_size_v, bool paged_KV, bool is_local, bool is_causal, int64_t seqlen_q)
 {
+    if (std::getenv("FLASH_ATTN_DISABLE_MLA_DECODE_GEMV") != nullptr) {
+        return false;
+    }
     return has_q_v && num_heads <= 32 && num_heads_k == 1 && head_size_v == 512 && head_size_og + head_size_v == 576 &&
            !paged_KV && !is_local && !is_causal && seqlen_q == 1;
 }
@@ -460,6 +464,21 @@ std::vector<at::Tensor> mha_fwd(
         const int64_t wsSplit = partialRowsUpper * (static_cast<int64_t>(head_size_v) + 1) * sizeof(float);
         workspace_tensor = at::empty({wsBase + wsSplit}, at::device(at::kPrivateUse1).dtype(at::kByte));
         launchBlockDim = blockDim;
+        if (!mlaDecodeGemvShape && seqlen_q == 1 && !is_local) {
+            const uint32_t groupSize = static_cast<uint32_t>(num_heads / num_heads_k);
+            const uint32_t qNBlockTile = fa_split::GetQNBlockTile(1U, groupSize);
+            const uint32_t qNBlocks = (groupSize + qNBlockTile - 1U) / qNBlockTile;
+            const uint32_t kvBlocks =
+                (static_cast<uint32_t>(declared_k) + fa_split::MAX_KV_STACK_LEN - 1U) /
+                fa_split::MAX_KV_STACK_LEN;
+            uint32_t kvSegments = 1U;
+            if (num_splits != 1) {
+                kvSegments = num_splits > 1 ? std::min<uint32_t>(num_splits, kvBlocks) : kvBlocks;
+            }
+            const uint32_t tasks = static_cast<uint32_t>(batch_size) * static_cast<uint32_t>(num_heads_k) *
+                                   qNBlocks * kvSegments;
+            launchBlockDim = std::max(1U, std::min(blockDim, tasks));
+        }
 
         // Write the per-call runtime data asynchronously via AICPU so the
         // explicit-metadata forward stays capture-safe (a synchronous H2D memcpy
@@ -690,6 +709,7 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.flashDecodeFlag = flashDecodeFlag;
     fwd_args.has_softcap = has_softcap;
     fwd_args.mlaDecodeGemv = mlaDecodeGemvShape;
+    fwd_args.skip_lse = std::getenv("FLASH_ATTN_BENCH_SKIP_LSE") != nullptr;
     fwd_args.layout = is_bnsd_layout ? FaiKenel::inputLayout::BNSD
                                      : (is_tnd_layout ? FaiKenel::inputLayout::TND : FaiKenel::inputLayout::BSND);
     fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;

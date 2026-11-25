@@ -11,6 +11,7 @@ namespace fa_split {
 constexpr uint32_t Q_TILE_CEIL = 128;
 constexpr uint32_t N_SPLIT_HELPER = 2;
 constexpr uint32_t MAX_KV_STACK_LEN = 512;
+constexpr uint32_t DECODE_KV_STACK_LEN = 384;
 
 inline uint32_t FaMin(uint32_t a, uint32_t b)
 {
@@ -26,6 +27,9 @@ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
     uint32_t qRowNumCeil = Q_TILE_CEIL;
     uint32_t qNBlockTile = (qSeqlen != 0) ? (qRowNumCeil / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER : Q_TILE_CEIL;
     qNBlockTile = FaMin(qNBlockTile, groupSize);
+    if (qSeqlen == 1U) {
+        qNBlockTile = FaMin(qNBlockTile, 16U);
+    }
     qNBlockTile = FaMax(qNBlockTile, static_cast<uint32_t>(1));
     return qNBlockTile;
 }
@@ -82,7 +86,8 @@ inline BatchParams getBatchParams(uint32_t bIdx, uint32_t groupSize, const Split
     p.curQNBlockNum = p.qNBlockNumPerGroup * ctx.num_heads_k;
     p.curQSBlockTile = GetQSBlockTile(p.kvSeqlen);
     p.curQSBlockNum = (p.qSeqlen + p.curQSBlockTile - 1) / p.curQSBlockTile;
-    p.curKSBlockTile = GetKSBlockTile(p.kvSeqlen);
+    p.curKSBlockTile =
+        (ctx.seqlen_q == 1 && ctx.num_splits != 1) ? DECODE_KV_STACK_LEN : MAX_KV_STACK_LEN;
     // Per-phase S2 block count: old blocks + new blocks
     uint32_t kvSeqlenOld = static_cast<uint32_t>(p.kvSeqlen - ctx.kvNewSeqlen);
     uint32_t kvSBlockNumOld = (kvSeqlenOld + p.curKSBlockTile - 1) / p.curKSBlockTile;

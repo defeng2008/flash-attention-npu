@@ -114,6 +114,9 @@ __aicore__ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
 {
     uint32_t qNBlockTile = (qSeqlen != 0) ? (Q_TILE_CEIL / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER : Q_TILE_CEIL;
     qNBlockTile = qNBlockTile < groupSize ? qNBlockTile : groupSize;
+    if (qSeqlen == 1U) {
+        qNBlockTile = qNBlockTile < 16U ? qNBlockTile : 16U;
+    }
     qNBlockTile = qNBlockTile < 1 ? 1 : qNBlockTile;
     return qNBlockTile;
 }

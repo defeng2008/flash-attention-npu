@@ -19,8 +19,8 @@
 #include "mla_decode_gemv.hpp"
 
 // 8-parameter FAInfer: Q/KV/accumulator types, paged, mask/layout, LSE mode, softcap.
-#define FWD_LAUNCH(DTYPE, PAGED, MASK_TYPE, LAYOUT_TYPE, SOFTCAP)                                                      \
-    SplitFuse::FAInfer<DTYPE, DTYPE, float, PAGED, MASK_TYPE, LAYOUT_TYPE, Catlass::Epilogue::LseModeT::OUT_ONLY,      \
+#define FWD_LAUNCH(DTYPE, PAGED, MASK_TYPE, LAYOUT_TYPE, SOFTCAP, LSE_MODE)                                             \
+    SplitFuse::FAInfer<DTYPE, DTYPE, float, PAGED, MASK_TYPE, LAYOUT_TYPE, Catlass::Epilogue::LseModeT::LSE_MODE,       \
                        SOFTCAP><<<launchBlockDim, nullptr, aclStream>>>(                                               \
         fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice,      \
         kvSeqDevice, workspaceDevice, tiling, kNewDevice, vNewDevice, sequsedQDevice, sequsedKVDevice,                 \
@@ -97,7 +97,13 @@ void launch_fwd_dtype(const FwdLaunchArgs& a)
     }
     FWD_BOOL_SWITCH(paged_KV, IsPaged, {
         FWD_MASK_SWITCH(is_local, is_causal, MaskType, {
-            FWD_BOOL_SWITCH(has_softcap, HasSoftcap, { FWD_LAUNCH(DType, IsPaged, MaskType, LAYOUT, HasSoftcap); });
+            FWD_BOOL_SWITCH(has_softcap, HasSoftcap, {
+                if (a.skip_lse) {
+                    FWD_LAUNCH(DType, IsPaged, MaskType, LAYOUT, HasSoftcap, NONE);
+                } else {
+                    FWD_LAUNCH(DType, IsPaged, MaskType, LAYOUT, HasSoftcap, OUT_ONLY);
+                }
+            });
         });
     });
 }
