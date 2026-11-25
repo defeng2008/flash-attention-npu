@@ -1,0 +1,40 @@
+{
+  "task": "perf_bnsd_vs_cann",
+  "task_dir": "/home/w00811046/code/fan/261022confict/flash-attention-npu/docs/tests/perf_bnsd_vs_cann",
+  "n_cases_total": 1,
+  "n_cases_valid": 1,
+  "geomean_speedup": 0.8244474814464168,
+  "mean_speedup": 0.8244474814464168,
+  "median_speedup": 0.8244474814464168,
+  "min_speedup": 0.8244474814464168,
+  "max_speedup": 0.8244474814464168,
+  "mean_ref_us": 3669.638,
+  "median_ref_us": 3669.638,
+  "geomean_ref_us": 3669.6380000000013,
+  "total_ref_us": 3669.638,
+  "mean_asc_us": 4451.027,
+  "median_asc_us": 4451.027,
+  "geomean_asc_us": 4451.027,
+  "total_asc_us": 4451.027,
+  "total_speedup": 0.8244474814464168,
+  "warmup": 3,
+  "repeats": 1,
+  "seed": 0,
+  "device_id": 4,
+  "device_select_source": "cli",
+  "timing_method": "msprof.op_summary.Task_Duration",
+  "per_case": [
+    {
+      "case": 0,
+      "shape": "[1, 64, 4096, 128]",
+      "dtype": "float16",
+      "ref_us": 3669.638,
+      "asc_us": 4451.027,
+      "speedup": 0.8244474814464168,
+      "ref_error": null,
+      "asc_error": null,
+      "ref_prof_dir": "/tmp/msprof_ref_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232731",
+      "asc_prof_dir": "/tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949"
+    }
+  ]
+}

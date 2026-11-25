@@ -1,0 +1,24 @@
+Device_id,Level,API Name,Time(us),Count,Avg(us),Min(us),Max(us),Variance
+host,acl,aclnnInnerFusedInferAttentionScore,16131.804,4,4032.951,40.701,15999.585,47733455.107
+host,acl,aclnnInnerFusedInferAttentionScoreGetWorkspaceSize,220858.411,4,55214.603,5.468,220813.093,9140953443.227
+host,acl,aclnnInnerFusedInferAttentionScoreTiling,195.763,1,195.763,195.763,195.763,0
+host,acl,aclrtBinaryLoadFromData,34166.511,1,34166.511,34166.511,34166.511,0
+host,acl,aclrtCreateStreamWithConfig,2630.987,2,1315.494,1171.948,1459.039,20605.311
+host,acl,aclrtCtxGetFloatOverflowAddr,1.412,1,1.412,1.412,1.412,0
+host,acl,aclrtCtxGetSysParamOpt,13.09,6,2.182,0.151,10.366,13.754
+host,acl,aclrtCtxSetSysParamOpt,4.497,2,2.249,0.531,3.966,2.95
+host,acl,aclrtDestroyStreamForce,459.229,1,459.229,459.229,459.229,0
+host,acl,aclrtFree,439.909,2,219.955,153.86,286.049,4368.483
+host,acl,aclrtGetCurrentContext,2.844,1,2.844,2.844,2.844,0
+host,acl,aclrtGetDeviceCount,7.712,2,3.856,3.155,4.557,0.491
+host,acl,aclrtGetResInCurrentThread,6.81,10,0.681,0.09,3.044,0.805
+host,acl,aclrtGetStreamAttribute,3.094,4,0.774,0.09,2.794,1.361
+host,acl,aclrtLaunchKernelWithHostArgs,374.112,4,93.528,33.03,271.918,10608.138
+host,acl,aclrtMemcpy,63601.622,4,15900.405,886.941,25090.323,82335138.285
+host,acl,aclrtResetDevice,5.859,1,5.859,5.859,5.859,0
+host,acl,aclrtSetDevice,77.617,1,77.617,77.617,77.617,0
+host,acl,aclrtSetOpExecuteTimeOutV2,1167.591,1,1167.591,1167.591,1167.591,0
+host,acl,aclrtSetStreamFailureMode,15.594,2,7.797,2.354,13.24,29.626
+host,acl,aclrtSynchronizeDeviceWithTimeout,2915.113,6,485.852,1.843,907.361,181336.642
+host,acl,aclrtSynchronizeStream,19.248,4,4.812,2.343,7.532,3.383
+host,node,launch,15976.57,4,3994.143,33.981,15867.306,46990675.306

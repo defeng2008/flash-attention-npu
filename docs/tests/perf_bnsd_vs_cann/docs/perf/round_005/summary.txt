@@ -1,0 +1,62 @@
+=== 上板性能统计摘要 (msprof) ===
+Op: _Z7FAInferIDhfL6Format2ELS0_2EL9CacheMode0EL9PageShape2EL12MaskCategory1EL11CacheLayout0ELb1ELb0EEvPhS5_S5_S5_S5_S5_S5_S5_S5_S5_S5_S5_S5_ffjjl
+Type: _Z7FAInferIDhfL6Format2ELS0_2EL9CacheMode0EL9PageShape2EL12MaskCategory1EL11CacheLayout0ELb1ELb0EEvPhS5_S5_S5_S5_S5_S5_S5_S5_S5_S5_S5_S5_ffjjl | TaskType: MIX_AIC | Duration: 1479.558us | BlockDim: 28 (mix=56)
+
+[注] msprof 的 op_summary 是 per-op 聚合值（不含逐核 min/avg/max）；
+     如需逐核数据请改用 msprof op (需要 msopprof 二进制)。
+
+--- Pipe ratios (主导核 = aic) ---
+  aicore_time: 1479.170us | aiv_time: 1479.190us
+  aic: mac= 80.70% | mte1= 47.50% | mte2= 87.00% | fixpipe= 73.20% | scalar= 60.60%
+  aiv: vec= 84.10% | scalar= 27.10% | mte2=  1.60% | mte3= 44.70%
+  cube_utilization: 65.88%
+
+--- 头开销 ---
+  Task Duration: 1479.558us | 核最长耗时: 1479.190us | 头开销: 0.368us (0.0%)
+
+--- Memory 带宽 (aic-metrics=Memory) ---
+  aic main_mem read: 2.44 GB/s
+  aiv main_mem read: 0.04 GB/s
+  aiv main_mem write: 0.04 GB/s
+  aic L1 read: 302.62 GB/s
+  aic L1 write: 131.82 GB/s
+  aiv UB read: 36.76 GB/s
+  aiv UB write: 76.20 GB/s
+
+--- MemoryL0 ---
+  L0A read: 604.05 GB/s
+  L0A write: 151.01 GB/s
+  L0B read: 37.75 GB/s
+  L0B write: 75.51 GB/s
+  L0C write (cube): 37.75 GB/s
+
+--- MemoryUB ---
+  UB read (vector): 15.75 GB/s
+  UB write (vector): 13.83 GB/s
+  aic fixp2ub write: 150.90 GB/s
+
+--- L2Cache ---
+  aic read: hit=7271242 miss=1561274 hit_rate=82.32%
+  aiv read: hit=280818 miss=24 hit_rate=99.99%
+  aiv write: hit=70176 miss=0 hit_rate=100.00%
+
+--- ResourceConflict ---
+  vec_bank_cflt= 19.80% | vec_resc_cflt=190.90%
+
+--- ArithmeticUtilization ---
+  mac_fp16= 76.70% | mac_int8=  4.00% | cube_fops=312962400256
+
+--- 原始数据位置 ---
+  归档 CSV : /home/w00811046/code/fan/261022confict/flash-attention-npu/docs/tests/perf_bnsd_vs_cann/docs/perf/round_005/
+  原始 PROF: /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/
+  按 aic-metrics 拆分的 op_summary_<Metric>.csv 均已复制到归档目录，
+  如需逐列查看可直接 Read。
+
+--- Metric 来源 ---
+  PipeUtilization        <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_PipeUtilization/PROF_000001_20261024233021540_01249930IEJAONGK/mindstudio_profiler_output/op_summary_20261024233031.csv
+  ArithmeticUtilization  <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_ArithmeticUtilization/PROF_000001_20261024233035800_01251035BARFPRFO/mindstudio_profiler_output/op_summary_20261024233044.csv
+  Memory                 <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_Memory/PROF_000001_20261024233048632_01252050MMAKRFMA/mindstudio_profiler_output/op_summary_20261024233058.csv
+  MemoryL0               <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_MemoryL0/PROF_000001_20261024233102713_01253234FBOQMNFB/mindstudio_profiler_output/op_summary_20261024233112.csv
+  MemoryUB               <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_MemoryUB/PROF_000001_20261024233116745_01254285AMHDMKIH/mindstudio_profiler_output/op_summary_20261024233126.csv
+  L2Cache                <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_L2Cache/PROF_000001_20261024233131007_01255562QBFBJBHO/mindstudio_profiler_output/op_summary_20261024233140.csv
+  ResourceConflictRatio  <- /tmp/msprof_asc_perf_bnsd_vs_cann_c0/PROF_GROUP_20261024_232949/PROF_ResourceConflictRatio/PROF_000001_20261024233144910_01256662NRFPKBGJ/mindstudio_profiler_output/op_summary_20261024233154.csv

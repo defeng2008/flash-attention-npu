@@ -1,0 +1,26 @@
+interfaces:
+  - key: func_v2
+    version: v2
+    devices: [910]
+    case_source: cases/source/func_v2.json
+    plugin_dir: plugins/func_v2
+  - key: kvcache_v2
+    version: v2
+    devices: [910]
+    case_source: cases/source/kvcache_v2.json
+    plugin_dir: plugins/kvcache_v2
+  - key: func_v3
+    version: v3
+    devices: [910, 950]
+    case_source: cases/source/func_v3.json
+    plugin_dir: plugins/func_v3
+  - key: kvcache_v3
+    version: v3
+    devices: [910, 950]
+    case_source: cases/source/kvcache_v3.json
+    plugin_dir: plugins/kvcache_v3
+  - key: func_v4
+    version: v4
+    devices: [910, 950]
+    case_source: cases/source/func_v4.json
+    plugin_dir: plugins/func_v4
