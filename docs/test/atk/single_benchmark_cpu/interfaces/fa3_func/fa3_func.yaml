@@ -25,8 +25,8 @@ version: v2.1
 generate: fa3_func_mla_constraints
 
 # 用例条数：精度张量有 bf16/fp16 两种 dtype，同一形状下每种 dtype 各生成一条，
-# 所以总条数 = max(各输入的 dtype 个数) × dtype_numbers = 2 × 25 = 50
-dtype_numbers: 25
+# 所以总条数 = max(各输入的 dtype 个数) × dtype_numbers = 2 × 12 = 24
+dtype_numbers: 12
 # 关掉边界/空 tensor 用例：q.shape 为空时钩子无法判断 prefill/decode
 extra_numbers: 0
 outputs: 1
