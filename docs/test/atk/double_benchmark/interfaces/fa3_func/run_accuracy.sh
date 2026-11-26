@@ -5,7 +5,6 @@
 #   1) atk case -f <stem>.yaml -p .  ->  result/<stem>/json/all_<stem>.json
 #   2) cp 到 <cat>/cases/all_<stem>.json（交付里可直接打开查看）
 #   3) atk task -c cases/all_<stem>.json ... 执行并产出精度/显存报告
-#   4) 最后补跑用户场景 anchor：cases/user_scenarios_fa3_func.json（报告与上一步分开）
 #
 # 环境约定：conda 环境 cann（已装 atk + atk_private_precision）/ CANN set_env.sh / TMPDIR
 set -euo pipefail
@@ -88,6 +87,4 @@ for stem in "${STEMS[@]}"; do
   run_case "${CASE_DIR}/all_${stem}.json"
 done
 
-# 用户场景 anchor，单独一个 json，报告与上面的生成用例分开
-run_case "${CASE_DIR}/user_scenarios_fa3_func.json"
 echo "[done] ${INTERFACE_NAME} (double_benchmark) -> ${CASE_DIR}"

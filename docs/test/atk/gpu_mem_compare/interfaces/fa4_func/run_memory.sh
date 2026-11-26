@@ -5,7 +5,6 @@
 #   1) atk case -f <stem>.yaml -p .  ->  result/<stem>/json/all_<stem>.json
 #   2) cp 到 <cat>/cases/all_<stem>.json（交付里可直接打开查看）
 #   3) atk task -c cases/all_<stem>.json ... 执行并产出精度/显存报告
-#   4) （显存对比套件不跑用户场景 anchor：用例全部来自 yaml 生成）
 #
 # 环境约定：conda 环境 cann（已装 atk + atk_private_precision）/ CANN set_env.sh / TMPDIR
 set -euo pipefail
@@ -88,5 +87,4 @@ for stem in "${STEMS[@]}"; do
   run_case "${CASE_DIR}/all_${stem}.json"
 done
 
-# 显存对比套件不出用户场景 anchor：用例全部来自 yaml 生成
 echo "[done] ${INTERFACE_NAME} (gpu_mem_compare) -> ${CASE_DIR}"
