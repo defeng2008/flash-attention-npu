@@ -50,14 +50,17 @@ def _core(q, k, v, qv, scale, causal, window_size, length):
     mask = _mask(scores.shape[-2], scores.shape[-1], causal, window_size)
     if mask is not None:
         scores = scores + mask.to(scores.dtype) * -1e4
-    probs = torch.softmax(scores, dim=-1)
-    # NPU 内核把 P 以原精度(bf16)存回后再与 V 做 fp32 累加；CPU 标杆必须复现该量化，
-    # 否则 fp32 的 P 会让近零元素的相对误差被放大（参考交付 benchmark_flash_attn_func_v3.py
-    # 的 pvMM2(p_result.to(data_type), ...) 即此口径）。
-    probs = probs.to(q.dtype).float()
+    # 内核 flash-attention 口径：P = exp(s - max) 先量化到输入精度（内核 Cast 到 PType，
+    # 设备默认 RNE，已实测），再与 V 做 fp32 累加；行和 l 取 fp32 的 exp 之和
+    # （内核 CalcLocalRowSum 用的是 fp32 ls），最后除以 l。标杆必须复现整条链路：
+    # 量化「未归一化的 exp」而不是「softmax 归一化后的概率」，否则近零元素的
+    # 相对误差会被放大（编号 17 即此原因）。
+    e = torch.exp(scores - scores.max(dim=-1, keepdim=True).values)
+    length_sum = e.sum(dim=-1, keepdim=True)
+    probs = e.to(q.dtype).float()
     if value.shape[0] != probs.shape[0] and probs.shape[0] % value.shape[0] == 0:
         value = value.repeat_interleave(probs.shape[0] // value.shape[0], dim=0)
-    return (probs @ value).transpose(0, 1)
+    return (probs @ value / length_sum).transpose(0, 1)
 
 
 def _bsnd(q, k, v, qv, scale, causal, window_size, lengths, page_table):
