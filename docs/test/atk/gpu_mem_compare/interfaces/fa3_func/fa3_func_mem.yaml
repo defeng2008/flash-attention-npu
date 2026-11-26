@@ -1,5 +1,5 @@
 # fa3_func_mem.yaml —— flash_attn_npu_3.flash_attn_func 的 ATK 用例设计文件
-# 类别：gpu_mem_compare（npu(FA3/FA4) vs GPU(daoailab) 峰值显存对比（需要 GPU 主机））
+# 类别：gpu_mem_compare（npu(FA3/FA4) vs CANN 9.2 FIA(npu) 峰值显存对比）
 #
 # 这份 yaml 是本接口的**唯一真值**，用例不再手写，而是由 run 脚本现场生成：
 #   atk case -f fa3_func_mem.yaml -p . -s <seed>
@@ -124,15 +124,4 @@ inputs:
     ranges:
       valid:
         values: [false, true]
-  # window_size: (left, right) 二元组，-1 表示该侧不限制；两个元素独立取值
-# 只有候选和标杆都支持该入参的类别才声明（FIA 标杆没有）
-  - name: window_size
-    type: attr_tuple
-    required: false
-    tuple_numbers:
-      values: [2]
-    dtypes:
-      values: [int]
-    ranges:
-      valid:
-        values: [-1, 64, 128]
+  # 说明：标杆为 CANN FIA，无 window_size 入参，故本类别（gpu_mem_compare）不声明该字段

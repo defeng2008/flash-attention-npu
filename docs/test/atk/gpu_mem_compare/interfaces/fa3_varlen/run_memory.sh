@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gpu_mem_compare —— npu(FA3/FA4) vs GPU(daoailab) 峰值显存对比（需要 GPU 主机）
+# gpu_mem_compare —— npu(FA3/FA4) vs CANN 9.2 FIA(npu) 峰值显存对比（候选与标杆同为 NPU）
 #
 # 流程（yaml 是唯一真值，用例全部由 atk case 生成、不再手写）：
 #   1) atk case -f <stem>.yaml -p .  ->  result/<stem>/json/all_<stem>.json
@@ -43,9 +43,10 @@ INTERFACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERFACE_NAME="$(basename "${INTERFACE_DIR}")"
 DELIVERY_DIR="$(cd "${INTERFACE_DIR}/../../.." && pwd)"
 CASE_DIR="${DELIVERY_DIR}/gpu_mem_compare/cases"
-NODES_FILE="nodes_memory_gpu.yaml"
+NODES_FILE="nodes_memory_cann.yaml"
 SEED="${ATK_SEED:-20261113}"
-if [ "multi" = "multi" ]; then _SP=""; else _SP="--single_process"; fi
+# 候选与 FIA 标杆同在 device 0，必须串行执行，否则两节点并发跑同一张卡会互相踩显存
+_SP="--single_process"
 
 mkdir -p "${CASE_DIR}"
 cd "${INTERFACE_DIR}"
@@ -65,7 +66,7 @@ run_case() {
     -n "${NODES_FILE}" \
     -p . \
     --task memory_device \
-    --bm_device gpu \
+    --bm_device npu \
     ${_SP} \
     --log warning \
     --save_data input \

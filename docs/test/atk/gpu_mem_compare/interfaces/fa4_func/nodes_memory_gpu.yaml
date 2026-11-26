@@ -1,9 +1,0 @@
-nodes:
-  - backend: npu
-    devices: [0]
-    task: [memory_device]
-  - backend: gpu
-    host: 90.90.81.190
-    port: 9999
-    devices: [0]
-    task: [memory_device]

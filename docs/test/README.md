@@ -59,15 +59,15 @@ export TMPDIR=/home/w00811046/tmp
 | `single_benchmark_cpu` | CPU fp32 标杆 | `nodes_accuracy.yaml` | `--task accuracy --bm_device cpu --single_process` |
 | `single_benchmark_cann` | CANN `npu_fused_infer_attention_score` | `nodes_accuracy_cann.yaml` | `--task accuracy --bm_device npu --single_process` |
 | `double_benchmark` | GPU(daoailab) + CPU 双标杆 | `nodes_accuracy_gpu.yaml` | `--task accuracy --bm_device cpu`（多进程） |
-| `gpu_mem_compare` | GPU 峰值显存 | `nodes_memory_gpu.yaml` | `--task memory_device --bm_device gpu`（多进程） |
+| `gpu_mem_compare` | CANN `npu_fused_infer_attention_score`（FIA）峰值显存 | `nodes_memory_cann.yaml` | `--task memory_device --bm_device npu --single_process` |
 
-> `double_benchmark` / `gpu_mem_compare` 的 `nodes_*.yaml` 里带一个**远端 GPU 节点**，出货是占位 IP，跑之前必须先配置 GPU 主机 IP 并在该主机上起 atk server，见 2.7 节。
+> `double_benchmark` 的 `nodes_*.yaml` 里带一个**远端 GPU 节点**，出货是占位 IP，跑之前必须先配置 GPU 主机 IP 并在该主机上起 atk server，见 2.7 节（`gpu_mem_compare` 已改为候选 NPU vs CANN FIA 的同机对比，无需 GPU 主机）。
 
 ### 2.2 接口与用例变体
 
 每个套件覆盖 5 个接口：`fa3_func` / `fa3_varlen` / `fa3_kvcache` / `fa4_func` / `fa4_varlen`。
 
-- 交付范围**不含分页 KV（paged）变体**：`fa3_kvcache_paged.yaml` / `fa4_varlen_paged.yaml` 已从各套件删除，`gen_atk_mla.py` 中 `fa3_kvcache` / `fa4_varlen` 的 `paged` 开关已置为 `False`（重建不会再生成）。
+- 交付范围**不含分页 KV（paged）变体**：`fa3_kvcache_paged.yaml` / `fa4_varlen_paged.yaml` 已从各套件删除，`gen_atk_mla.py` 中 `fa3_kvcache` / `fa4_varlen` 的 `paged` 开关已置为 `False`（重建不会再生成）。标杆侧（CANN FIA）本就无 `page_table` 入参。
 - 因此每个套件的 yaml 数量均为 5。
 - `gpu_mem_compare` 的载体文件名统一带 `_mem` 后缀（yaml / 钩子 / 标杆 / 适配器，如 `fa3_func_mem.yaml`、`generate_fa3_func_mem.py`、`benchmark_fa3_func_mem.py`、`execute_fa3_func_mem.py`），与精度套件区分。
 
@@ -188,19 +188,18 @@ atk task -c ../../../single_benchmark_cann/cases/user_scenarios_fa3_func.json \
 | 套件 | `all_*.json` 条数 | `user_scenarios_*.json` 条数 | 小计 |
 |---|---|---|---|
 | `single_benchmark_cann` | 5 × 200 = 1000 | 5 × 4 = 20 | **1020** |
-| `single_benchmark_cpu` | 5 × 50 = 250 | 5 × 4 = 20 | **270** |
-| `double_benchmark` | 5 × 50 = 250 | 5 × 4 = 20 | **270** |
+| `single_benchmark_cpu` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
+| `double_benchmark` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
 | `gpu_mem_compare` | 5 × 12 = 60 | — （不出用户场景 anchor） | **60** |
-| **合计** | | | **1620** |
+| **合计** | | | **1820** |
 
-### 2.7 GPU 标杆主机配置（`double_benchmark` / `gpu_mem_compare`）
+### 2.7 GPU 标杆主机配置（`double_benchmark`）
 
-这两个套件比 `nodes_accuracy.yaml` 多一个**远端 GPU 节点**（官方 TriDao flash-attn：FA3 Hopper / FA4 CuTe 实现），出货时是占位 IP：
+该套件比 `nodes_accuracy.yaml` 多一个**远端 GPU 节点**（官方 TriDao flash-attn：FA3 Hopper / FA4 CuTe 实现），出货时是占位 IP：
 
 | 套件 | 节点文件（每个接口目录一份） | 占位内容 |
 |---|---|---|
 | `double_benchmark` | `interfaces/<iface>/nodes_accuracy_gpu.yaml` | `host: 192.168.0.100  # TODO: 改为 GPU 主机 IP` |
-| `gpu_mem_compare` | `interfaces/<iface>/nodes_memory_gpu.yaml` | 同上（`task: [memory_device]`） |
 
 ```yaml
 nodes:
@@ -213,12 +212,12 @@ nodes:
     host: 192.168.0.100   # ← 改成 GPU 主机 IP（必填）
     port: 9090            # ← 与 GPU 主机上 atk server 的端口一致
     devices: [0]          # ← GPU 卡号
-    task: [accuracy]      # 显存套件为 [memory_device]
+    task: [accuracy]
 ```
 
 配置三步：
 
-1. **改 IP**：把 5 个接口目录下的 `nodes_accuracy_gpu.yaml` / `nodes_memory_gpu.yaml` 的 `host` 改成 GPU 主机 IP（`devices` 按需改成 GPU 卡号，多卡写 `[0,1]`）。
+1. **改 IP**：把 5 个接口目录下的 `nodes_accuracy_gpu.yaml` 的 `host` 改成 GPU 主机 IP（`devices` 按需改成 GPU 卡号，多卡写 `[0,1]`）。
    - ATK 里 `host` 默认值是 `127.0.0.1`，与本地节点同源判定，**不能填 `127.0.0.1` / `localhost`**，否则会在 NPU 机上用 `torch.cuda` 跑 GPU 标杆，必然失败。
    - `host` / `port` / `devices` 是**每个接口目录各存一份**，只改 `fa3_func` 就只对 `fa3_func` 生效。
 
@@ -370,3 +369,4 @@ python docs/test/perf/mla_user_scenarios.py        # 可选：仅打印两个场
 6. **CPU / GPU 标杆套件用例已减至 50 条/接口（2026-11-17）**：`single_benchmark_cpu`、`double_benchmark` 的 `dtype_numbers` 由 100 降为 25（总条数 = `max(各输入的 dtype 个数) × n` = 2 × 25 = 50），以缩短 CPU fp32 / GPU 标杆耗时；仅 `single_benchmark_cann` 保持每接口 200 条（显存套件 `gpu_mem_compare` 因单条用例已放大到 ≥500MiB，进一步降到 6 ⇒ 12 条，见第 8 条）。`gen_atk_mla.py` 已同步该值，重建不会回退；三套件的 `cases/all_*.json` 已按新配置重新生成。
 7. **标杆 `execute_*.py` 的 decode（吸收态）分支已修复（2026-11-17）**：该分支此前漏传 `atten_mask` 且把 `sparse_mode` 写死为 `0`，使 `causal=True` 且 `Sq>1` 的吸收用例被 FIA 按**非 causal** 计算而产生大误差（`single_benchmark_cann` 1000 条中约 40 条）。现所有标杆分支统一对齐 prefill 写法（`atten_mask=mask` + `sparse_mode=3 if causal else 0`），已改 `single_benchmark_cann`、`double_benchmark` 共 10 个 `execute_*.py`（每个含 TND / BSND 两处）；`single_benchmark_cpu`、`gpu_mem_compare` 中的同名分支不参与判定，暂未改动。
 8. **显存对比套件用例放大到「500MiB ≤ 输入+输出 ≤ 700MiB」区间（2026-11-19）**：`gpu_mem_compare` 的显存判据在 `input+output < 500MiB` 时是硬比值 `NPU/GPU ≤ 1.05`，而 NPU MLA kernel 每次调用都申请一块**与输入规模无关**的固定 workspace（`blockDim × 2.75MB`，约 60–70MB），小用例下峰值被该定值主导（比值 15×~1600×）→ 全 fail → 通过率 0%。现把 7 个 `*_mem*.yaml` 的 batch / 序列维放大到单条落在 500MiB~700MiB 以走 L2 豁免通道（末维被 MLA 锁死不能动）：BSND `B=2`、`Sq=Sk∈{7680,8192}`；TND `Tq=Tk∈{14336,16384}`；实测 553MiB ~ 640MiB。因「同一 Sq 下 decode 吸收态体积是 prefill 的 1.73 倍」而区间只有 1.4 倍宽，无法共用同一序列候选；故 fa3 的三个接口（`fa3_func` / `fa3_kvcache` / `fa3_varlen`）的钩子把 decode 的序列长度**钉死**为 BSND `4096` / TND `8192`（约 561MiB），使 **prefill 与 decode（含 `qv`）都能落在区间内**（每接口 12 条里约 5~6 条为 decode）。fa4 仍只出 prefill（官方 FA4 cute 在 SM90 上 dv ≤ 128）。`dtype_numbers` 25→6（每接口 12 条）。同时该套件**不再出用户场景 anchor**（`cases/user_scenarios_*_mem.json` 已删、`run_memory.sh` 第 4 步已去掉）——小 shape 的 anchor 与放大后的用例口径不一致。`gen_atk_mla.py` 已同步（新增 `_MEM_*` 常量、`prefill_only`、钩子 decode 钉长占位 `@@PIN_BSND@@` / `@@PIN_TND@@`、anchor 条件生成），`cases/all_*_mem.json` 已按新配置重生成。
+9. **显存对比套件标杆由 GPU 改为 CANN 9.2 FIA（2026-11-26）**：`gpu_mem_compare` 的标杆从远端 GPU(daoailab) 官方 TriDao 实现改为 **CANN 9.2 `torch_npu.npu_fused_infer_attention_score`（FIA）**，标杆节点与候选节点同机（`nodes_memory_cann.yaml`：`candidate` + `fia_mla`，两者 `devices: [0]`，`--task memory_device --bm_device npu --single_process`；`execute_*_mem.py` 新增 `FIA_NODE_NAME = "fia_mla"` 与 `_fia()` 标杆分支、去掉原 `_gpu()`；因两个 NPU 节点同卡且 ATK 会按 host/port 分组并发，必须加 `--single_process`）。FIA 无 `window_size` / `page_table`，故 5 个 `*_mem.yaml` 去掉 `window_size` 声明、2 个 paged 变体（`fa3_kvcache_mem_paged` / `fa4_varlen_mem_paged`）已删除；判据为**候选 NPU 显存 / FIA 显存 ≤ 1.05**，或 `input+output ≥ 500MiB` 时 `|候选-FIA| ≤ L2`。`gen_atk_mla.py` **已同步（2026-11-26）**：`CATEGORIES["gpu_mem_compare"]` 改为 `nodes=nodes_memory_cann.yaml` / `bm=npu` / `multi=False`，`NODES` 新增 `nodes_memory_cann.yaml` 模板（`candidate` + `fia_mla`，均 `task: [memory_device]`），并让 `variants`（不出 paged 变体）、`can_window`（不声明 `window_size`）、`bm_name`（`fia_mla`）、`prefill_only`（fa4 仍只出 prefill）按 FIA 口径生效，**重跑生成器不会再回退成 GPU 标杆**。注意：生成器模板与磁盘上已手工润色的 run / adapter 文案存在细微差异（例如模板的 `execute_*_mem.py` 保留了一个不参与判定的 `_gpu()` 辅助方法、run 脚本的 CANN 自动探测被简化为默认 `cann-9.2.0-clean`），重跑生成器会把这些文件规整回模板样式（逻辑等价，不影响通过率）。

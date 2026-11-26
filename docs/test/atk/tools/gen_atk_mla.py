@@ -18,6 +18,9 @@ Run:  python3 docs/test/atk/tools/gen_atk_mla.py
     cases/user_scenarios_<base>.json，由 run_*.sh 串跑，报告与生成用例分开。
   * gpu_mem_compare 不出用户场景 anchor：小 shape 的显存峰值被 MLA 的固定 workspace
     主导，与放大后的生成用例口径不一致，故该类别既不生成也不串跑 anchor。
+  * gpu_mem_compare 的标杆是 CANN npu_fused_infer_attention_score（与候选同机的 npu 节点，
+    不再是 GPU），FIA 没有 page_table / window_size 入参，故该类别不出 paged 变体、
+    yaml 也不声明 window_size；形状与判据沿用原设计。
   * gpu_mem_compare 的用例要落在「输入+输出 500MiB~700MiB」才走 L2 豁免通道；prefill 与
     decode 共用同一个序列维候选，而同 Sq 下 decode 体积是 prefill 的 1.73 倍，故该类别
     的钩子把 decode 的序列长度**固定**为 4096（BSND）/ 8192（TND）来保证两者都落在区间内。
@@ -75,24 +78,27 @@ CATEGORIES = {
                                   desc="npu 候选 vs CANN npu_fused_infer_attention_score 标杆精度对比"),
     # 显存对比：用例形状被放大到单条「输入+输出 >= 500MiB」（见 _MEM_* 常量），
     # 每条都远重于精度套件，故 dtype_numbers 进一步降到 6（2 个 dtype × 6 = 12 条/接口）。
-    "gpu_mem_compare": dict(kind="mem", nodes="nodes_memory_gpu.yaml", run="run_memory.sh",
-                            bm="gpu", task="memory_device", multi=True, dtype_numbers=6,
-                            desc="npu(FA3/FA4) vs GPU(daoailab) 峰值显存对比（需要 GPU 主机）"),
+    # 标杆是 CANN npu_fused_infer_attention_score（与候选同机的 npu 节点，不再是 GPU）：
+    # FIA 没有 page_table / window_size 入参，故本类别不出 paged 变体、yaml 也不声明 window_size。
+    "gpu_mem_compare": dict(kind="mem", nodes="nodes_memory_cann.yaml", run="run_memory.sh",
+                            bm="npu", task="memory_device", multi=False, dtype_numbers=6,
+                            desc="npu(FA3/FA4) vs CANN npu_fused_infer_attention_score 峰值显存对比"),
 }
 CAT_ORDER = ["double_benchmark", "single_benchmark_cpu", "single_benchmark_cann", "gpu_mem_compare"]
 
-# 官方 FA4 cute（CuTe）在 H200/SM90 上只支持 head_dim_v <= 128（256 编不过、512 直接被拒），
-# 所以 GPU 标杆类别里的 fa4 只出 prefill 形状（q/k 末维 192、v 末维 128）；
-# decode 吸收态（dv=512）的覆盖交给 single_benchmark_cpu / single_benchmark_cann。
-GPU_BENCHMARK_CATS = {"double_benchmark", "gpu_mem_compare"}
+# fa4 只出 prefill 形状的类别：
+#   * double_benchmark：官方 FA4 cute 在 H200/SM90 上 dv 只能 <=128（decode 吸收态 dv=512 跑不了）。
+#   * gpu_mem_compare：形状沿用「fa4 只出 prefill」，与已验收的用例集合保持一致（decode 的序列
+#     长度钉长只对 fa3 三个接口生效，fa4 若出 decode 会超出 500~700MiB 区间）。
+FA4_PREFILL_ONLY_CATS = {"double_benchmark", "gpu_mem_compare"}
 
 
 def prefill_only(iface, cat):
     """该 (接口, 类别) 是否只出 prefill 形状。
 
-    - GPU 标杆类别里的 fa4：官方 FA4 cute 在 H200/SM90 上 dv 只能 <=128。
+    - fa4 在 FA4_PREFILL_ONLY_CATS 里的类别只出 prefill（见上面的常量说明）。
     """
-    return iface.startswith("fa4") and cat in GPU_BENCHMARK_CATS
+    return iface.startswith("fa4") and cat in FA4_PREFILL_ONLY_CATS
 
 
 def stem_of(iface, cat, paged=False):
@@ -104,9 +110,9 @@ def stem_of(iface, cat, paged=False):
 def variants(iface, cat):
     """[(stem, paged), ...]。
 
-    cann 类不出 paged 变体：标杆 FIA 不接受 page_table 入参，出了也无法同口径比对。
+    cann / mem 类不出 paged 变体：标杆 FIA 不接受 page_table 入参，出了也无法同口径比对。
     """
-    if not IFACES[iface]["paged"] or cat == "single_benchmark_cann":
+    if not IFACES[iface]["paged"] or cat in ("single_benchmark_cann", "gpu_mem_compare"):
         return [(stem_of(iface, cat, False), False)]
     return [(stem_of(iface, cat, False), False), (stem_of(iface, cat, True), True)]
 
@@ -156,15 +162,18 @@ nodes:
     task: [accuracy]
     is_bm: true
 """,
-    "nodes_memory_gpu.yaml": """nodes:
+    "nodes_memory_cann.yaml": """# 候选 npu 与 FIA 标杆 npu 同设备；标杆节点带 is_bm，由 execute 按节点名判别。
+# 注意：不能给候选节点加 is_compare: false，否则 ATK 会把它排除在显存比对之外。
+nodes:
   - backend: npu
+    name: candidate
     devices: [0]
     task: [memory_device]
-  - backend: gpu
-    host: 192.168.0.100  # TODO: 改为 GPU 主机 IP
-    port: 9090
+  - backend: npu
+    name: fia_mla
     devices: [0]
     task: [memory_device]
+    is_bm: true
 """,
 }
 
@@ -708,7 +717,7 @@ _V_PAGED = [[1, 2], [BLOCK], [1, 32], [128, 512]]
 
 # gpu_mem_compare 专用：末维被 MLA 锁死（prefill 192/192/128、decode 64/512/64/512），
 # 只能放大 batch / 序列维。ATK 的显存判据在「输入+输出 >= 500MiB」时走 L2 豁免通道
-# （|NPU-GPU| <= L2 即通过）；这里给的每个候选都要让单条用例稳定落在
+# （|候选-FIA| <= L2 即通过）；这里给的每个候选都要让单条用例稳定落在
 # 「500MiB <= 输入+输出 <= 700MiB」区间内。
 #   prefill：BSND B=2、Sq=Sk 取 7680/8192      -> 600MiB / 640MiB
 #            TND  Tq=Tk 取 14336/16384        -> 560MiB / 640MiB
@@ -764,9 +773,10 @@ def _in_window():
 def inputs_for(iface, cat, paged):
     """按接口形态拼出 yaml 的 inputs 段。"""
     meta = IFACES[iface]
-    can_window = cat != "single_benchmark_cann"
-    # GPU 标杆类别下 fa4 只出 prefill：q/k 末维固定 192、v 末维固定 128，并去掉只在
-    # decode 吸收态出现的 qv。
+    # window_size 只有候选支持的类别才声明：FIA 标杆（cann / mem）没有该入参。
+    can_window = cat not in ("single_benchmark_cann", "gpu_mem_compare")
+    # fa4 在 FA4_PREFILL_ONLY_CATS 里只出 prefill：q/k 末维固定 192、v 末维固定 128，
+    # 并去掉只在 decode 吸收态出现的 qv。
     pref = prefill_only(iface, cat)
 
     # 显存对比类别：末维被 MLA 锁死不能动，只把 batch / 序列维放大到
@@ -888,6 +898,24 @@ def build_yaml(iface, cat, paged=False):
             "#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）",
             "#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）",
         ]
+    # fa4 只出 prefill 的说明：double_benchmark 是 GPU 标杆硬件限制；
+    # gpu_mem_compare 已改为 FIA 标杆，这里只为与已验收的用例集合保持一致。
+    pref_note = []
+    if pref:
+        if cat == "gpu_mem_compare":
+            pref_note = [
+                "# 本类别只出 prefill 形状：与已验收的用例集合保持一致（fa4 的 decode 序列长度未做",
+                "# 钉长，直接放大后会超出 500~700MiB 区间）；decode 的覆盖见",
+                "# single_benchmark_cpu / single_benchmark_cann。",
+                "#",
+            ]
+        else:
+            pref_note = [
+                "# GPU 标杆限定：官方 FA4 cute 在 H200(SM90) 上只支持 head_dim_v<=128，",
+                "# decode 吸收态(dv=512) 无法运行，故本类别只出 prefill 形状；",
+                "# decode 的覆盖见 single_benchmark_cpu / single_benchmark_cann。",
+                "#",
+            ]
     head = [
         f"# {stem}.yaml —— {meta['pkg']}.{meta['fn']} 的 ATK 用例设计文件",
         f"# 类别：{cat}（{cfg['desc']}）{paired}",
@@ -902,12 +930,7 @@ def build_yaml(iface, cat, paged=False):
         f"#     之间不可能自洽；跨输入的耦合全部由 generate_{iface}{sfx}.py 里的钩子按 MLA 的",
         "#     数学契约统一改写（头数、末维、cache 与索引张量的内容/长度等）。",
         "#     因此这里只写「每一维的候选取值」，不描述输入之间的对应关系。",
-    ] + form_lines + ["#"] + ([
-        "# GPU 标杆限定：官方 FA4 cute 在 H200(SM90) 上只支持 head_dim_v<=128，",
-        "# decode 吸收态(dv=512) 无法运行，故本类别只出 prefill 形状；",
-        "# decode 的覆盖见 single_benchmark_cpu / single_benchmark_cann。",
-        "#",
-    ] if pref else []) + shapes
+    ] + form_lines + ["#"] + pref_note + shapes
     body = [
         f"name: {meta['pkg']}.{meta['fn']}",
         "api: pytorch",
@@ -1082,7 +1105,7 @@ def iface_files(iface, cat):
     cfg = CATEGORIES[cat]
     kind = cfg["kind"]
     api_type = f"{iface}_mla_{'mem' if kind == 'mem' else 'accuracy'}"
-    bm_name = "fia_mla" if cat == "single_benchmark_cann" else ""
+    bm_name = "fia_mla" if cat in ("single_benchmark_cann", "gpu_mem_compare") else ""
     cls = "".join(p.capitalize() for p in iface.split("_")) + ("Mem" if kind == "mem" else "Api")
     # 适配器 / CPU 标杆的文件名带 _mem 后缀（与 yaml、register key 一致），
     # 避免和精度套件（single_benchmark_* / double_benchmark）里同名文件混淆。

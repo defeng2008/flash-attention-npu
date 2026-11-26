@@ -26,18 +26,7 @@ def _npu_fn():
     return fn
 
 
-def _to_scalar(v):
-    """把 numpy 标量 / 0 维 tensor 还原成 python 原生标量，其余原样返回。
-
-    ATK 会把 yaml 里的标量参数 materialize 成 numpy 标量或 0 维 tensor，
-    而 CuTe DSL 只接受 python 原生 float/int/bool，否则 JIT 编译时报
-    "... to Float conversion is not supported"。
-    """
-    if isinstance(v, torch.Tensor) and v.dim() == 0:
-        return v.item()
-    if type(v).__module__ == "numpy" and hasattr(v, "item"):
-        return v.item()
-    return v
+FIA_NODE_NAME = "fia_mla"
 
 
 @register("fa4_varlen_mla_mem")
@@ -59,18 +48,85 @@ class Fa4VarlenMem(BaseApi):
         kw = dict(input_data.kwargs)
         if self.device == "cpu":
             return cpu_impl(**kw)
-        if self.device == "gpu":
-            return self._gpu(kw)
         if self.device == "npu":
+            if getattr(self, "name", "") == FIA_NODE_NAME:
+                return self._fia(kw)
             npu_fn = _npu_fn()
             return npu_fn(**self._move({n: v for n, v in kw.items() if n in self._npu_accepted()},
                                        f"npu:{self.device_id}"))
         raise RuntimeError(f"Unsupported backend: {self.device}")
 
-    def _gpu(self, kw):
-        """官方 TriDao GPU 标杆（惰性导入，无 GPU 环境时不执行）。"""
-        from flash_attn.cute import interface as gpu_mod
-        gpu_fn = gpu_mod.flash_attn_varlen_func
-        accepted = set(inspect.signature(gpu_fn).parameters)
-        call = {n: _to_scalar(v) for n, v in kw.items() if n in accepted}
-        return gpu_fn(**self._move(call, f"cuda:{self.device_id}"))
+    def _case_dtype(self):
+        """用例配置里精度张量（q）的 dtype（bf16/fp16），默认 bf16。
+
+        ATK 标杆路径会把 bf16/fp16 输入都升精度到 fp32（见 InputDataset.get_benchmark_data），
+        单看张量 dtype 已无法区分用例原本是 bf16 还是 fp16，必须回到 case_config 读取。
+        """
+        inputs = getattr(getattr(self.task_result, "case_config", None), "inputs", None) or []
+        for entry in inputs:
+            if not isinstance(entry, list) and getattr(entry, "name", None) == "q":
+                name = str(getattr(entry, "dtype", "")).lower()
+                return {"fp16": torch.float16, "bf16": torch.bfloat16}.get(name, torch.bfloat16)
+        return torch.bfloat16
+
+    def _fia(self, kw):
+        """CANN npu_fused_infer_attention_score 标杆（映射对齐 docs/test/perf/bench_mla_vs_fia.py）。"""
+        import torch_npu
+        fia = torch_npu.npu_fused_infer_attention_score
+        dev = f"npu:{self.device_id}"
+        target_dtype = self._case_dtype()
+
+        def _dt(t):
+            # 标杆路径下 ATK 会把 bf16/fp16 输入都升精度到 fp32，而 aclnnFusedInferAttentionScore
+            # 的 MLA 分支只支持 bf16/fp16，这里按用例配置的精度回落（bf16 用例->bf16，fp16 用例->fp16）。
+            if isinstance(t, torch.Tensor) and t.dtype in (torch.float32, torch.float64):
+                return t.to(target_dtype)
+            return t
+
+        q = _dt(kw["q"])
+        k = _dt(kw.get("k", kw.get("k_cache")))
+        v = _dt(kw.get("v", kw.get("v_cache")))
+        qv = _dt(kw.get("qv"))
+        scale = kw.get("softmax_scale")
+        causal = bool(kw.get("causal", False))
+        if kw.get("cu_seqlens_q") is not None:      # TND 布局
+            cu_q, cu_k = kw["cu_seqlens_q"], kw["cu_seqlens_k"]
+            if qv is None:
+                half, rope = q.shape[-1] - 64, 64
+                q_nope, q_rope = q[..., :half].contiguous(), q[..., half:].contiguous()
+                k_nope, k_rope = k[..., :half].contiguous(), k[..., half:].contiguous()
+                mask = None
+                if causal:
+                    mask = torch.triu(torch.ones(2048, 2048), diagonal=1).bool().to(dev)
+                return fia(q_nope.to(dev), k_nope.to(dev), v.to(dev),
+                           atten_mask=mask, query_rope=q_rope.to(dev), key_rope=k_rope.to(dev),
+                           actual_seq_lengths=cu_q.tolist(), actual_seq_lengths_kv=cu_k.tolist(),
+                           num_heads=q.shape[1], scale=scale, input_layout="TND",
+                           num_key_value_heads=k.shape[1], sparse_mode=3 if causal else 0)[0]
+            mask = None
+            if causal:
+                mask = torch.triu(torch.ones(2048, 2048), diagonal=1).bool().to(dev)
+            return fia(qv.to(dev), v.to(dev), v.to(dev),        # TND decode (absorbed)
+                       atten_mask=mask, query_rope=q.to(dev), key_rope=k.to(dev),
+                       actual_seq_lengths=cu_q.tolist(), actual_seq_lengths_kv=cu_k.tolist(),
+                       num_heads=qv.shape[1], scale=scale, input_layout="TND",
+                       num_key_value_heads=v.shape[1], sparse_mode=3 if causal else 0)[0]
+        if qv is None:                              # BSND prefill
+            half, rope = q.shape[-1] - 64, 64
+            q_nope, q_rope = q[..., :half].contiguous().to(dev), q[..., half:].contiguous().to(dev)
+            k_nope, k_rope = k[..., :half].contiguous().to(dev), k[..., half:].contiguous().to(dev)
+            mask = None
+            if causal:
+                mask = torch.triu(torch.ones(2048, 2048), diagonal=1).bool().to(dev)
+            return fia(q_nope, k_nope, v.to(dev), atten_mask=mask,
+                       query_rope=q_rope, key_rope=k_rope, num_heads=q.shape[2], scale=scale,
+                       input_layout="BSND", num_key_value_heads=k.shape[2],
+                       sparse_mode=3 if causal else 0)[0]
+        mask = None
+        if causal:
+            mask = torch.triu(torch.ones(2048, 2048), diagonal=1).bool().to(dev)
+        return fia(qv.to(dev), v.to(dev), v.to(dev),           # BSND decode (absorbed)
+                   atten_mask=mask, query_rope=q.to(dev), key_rope=k.to(dev),
+                   num_heads=qv.shape[2], scale=scale,
+                   input_layout="BSND", num_key_value_heads=v.shape[2],
+                   sparse_mode=3 if causal else 0)[0]
