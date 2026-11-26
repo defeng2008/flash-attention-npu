@@ -40,11 +40,11 @@ IFACES = {
     "fa3_varlen": dict(pkg="flash_attn_npu_3", fn="flash_attn_varlen_func", gpu="fa3", layout="tnd",
                        paged=False, kvcache=False),
     "fa3_kvcache": dict(pkg="flash_attn_npu_3", fn="flash_attn_with_kvcache", gpu="fa3", layout="bsnd",
-                        paged=True, kvcache=True),
+                        paged=False, kvcache=True),
     "fa4_func": dict(pkg="flash_attn_npu_4", fn="flash_attn_func", gpu="fa4", layout="bsnd",
                      paged=False, kvcache=False),
     "fa4_varlen": dict(pkg="flash_attn_npu_4", fn="flash_attn_varlen_func", gpu="fa4", layout="tnd",
-                       paged=True, kvcache=False),
+                       paged=False, kvcache=False),
 }
 IFACE_ORDER = ["fa3_func", "fa3_varlen", "fa3_kvcache", "fa4_func", "fa4_varlen"]
 

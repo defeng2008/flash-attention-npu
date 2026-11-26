@@ -63,13 +63,12 @@ export TMPDIR=/home/w00811046/tmp
 
 > `double_benchmark` / `gpu_mem_compare` 的 `nodes_*.yaml` 里带一个**远端 GPU 节点**，出货是占位 IP，跑之前必须先配置 GPU 主机 IP 并在该主机上起 atk server，见 2.7 节。
 
-### 2.2 接口与 paged 变体
+### 2.2 接口与用例变体
 
-每个套件默认覆盖 5 个接口：`fa3_func` / `fa3_varlen` / `fa3_kvcache` / `fa4_func` / `fa4_varlen`。
+每个套件覆盖 5 个接口：`fa3_func` / `fa3_varlen` / `fa3_kvcache` / `fa4_func` / `fa4_varlen`。
 
-- `*_paged.yaml` 分页变体只出现在 **`fa3_kvcache`** 与 **`fa4_varlen`**（其 `paged=True`）。
-- `single_benchmark_cann` **不含** paged 变体（CANN FIA 无 `page_table` 入参）。
-- 因此 yaml 数量：`single_benchmark_cann` = 5，其余三个套件各 = 7。
+- 交付范围**不含分页 KV（paged）变体**：`fa3_kvcache_paged.yaml` / `fa4_varlen_paged.yaml` 已从各套件删除，`gen_atk_mla.py` 中 `fa3_kvcache` / `fa4_varlen` 的 `paged` 开关已置为 `False`（重建不会再生成）。
+- 因此每个套件的 yaml 数量均为 5。
 - `gpu_mem_compare` 的载体文件名统一带 `_mem` 后缀（yaml / 钩子 / 标杆 / 适配器，如 `fa3_func_mem.yaml`、`generate_fa3_func_mem.py`、`benchmark_fa3_func_mem.py`、`execute_fa3_func_mem.py`），与精度套件区分。
 
 ### 2.3 用例范围与组合方式
@@ -189,10 +188,10 @@ atk task -c ../../../single_benchmark_cann/cases/user_scenarios_fa3_func.json \
 | 套件 | `all_*.json` 条数 | `user_scenarios_*.json` 条数 | 小计 |
 |---|---|---|---|
 | `single_benchmark_cann` | 5 × 200 = 1000 | 5 × 4 = 20 | **1020** |
-| `single_benchmark_cpu` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
-| `double_benchmark` | 7 × 50 = 350 | 5 × 4 = 20 | **370** |
-| `gpu_mem_compare` | 7 × 12 = 84 | — （不出用户场景 anchor） | **84** |
-| **合计** | | | **1844** |
+| `single_benchmark_cpu` | 5 × 50 = 250 | 5 × 4 = 20 | **270** |
+| `double_benchmark` | 5 × 50 = 250 | 5 × 4 = 20 | **270** |
+| `gpu_mem_compare` | 5 × 12 = 60 | — （不出用户场景 anchor） | **60** |
+| **合计** | | | **1620** |
 
 ### 2.7 GPU 标杆主机配置（`double_benchmark` / `gpu_mem_compare`）
 
