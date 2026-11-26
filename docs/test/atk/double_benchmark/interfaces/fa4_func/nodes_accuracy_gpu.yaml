@@ -6,6 +6,6 @@ nodes:
     task: [accuracy]
   - backend: gpu
     host: 90.90.81.190
-    port: 9999
+    port: 9991
     devices: [0]
     task: [accuracy]
