@@ -34,6 +34,7 @@ from flash_attn_npu_3 import (
     flash_attn_func,
     flash_attn_varlen_func,
     flash_attn_with_kvcache,
+    get_scheduler_metadata,
 )
 if "Ascend950" in torch_npu.npu.get_device_name():
     from flash_attn_npu_3.flash_attn_npu_interface_950 import _flash_attn_backward
@@ -2719,3 +2720,64 @@ def test_v3_mla_flash_attn_with_kvcache(case):
     )
     assert tuple(out.shape) == (batch, sq, heads, dv)
     assert_fa_close(out, out_ref, out_pt, name="v3_mla_kvcache_out")
+
+
+@pytest.mark.golden_api("flash_attn_with_kvcache")
+@skip_unless_910_mla
+def test_v3_mla_decode_explicit_scheduler_metadata():
+    case = ("decode", torch.bfloat16, 1, 1, 1025, 32, 1, 64, 512, False)
+    _, data_type, batch, sq, sk, heads, heads_k, dq, dv, is_causal = case
+    scale = _mla_scale(case)
+    q, k, v, qv = _mla_inputs(case)
+    out_ref, _, out_pt, _ = _mla_golden(case, q, k, v, qv, scale)
+    cache_seqlens = torch.full((batch,), sk, dtype=torch.int32).npu()
+    metadata = get_scheduler_metadata(
+        batch,
+        sq,
+        sk,
+        heads,
+        heads_k,
+        dq,
+        cache_seqlens=cache_seqlens,
+        qkv_dtype=data_type,
+        headdim_v=dv,
+        causal=is_causal,
+        num_splits=0,
+    )
+
+    out = flash_attn_with_kvcache(
+        q,
+        k,
+        v,
+        qv=qv,
+        cache_seqlens=cache_seqlens,
+        softmax_scale=scale,
+        causal=is_causal,
+        scheduler_metadata=metadata,
+        num_splits=0,
+    )
+    assert tuple(out.shape) == (batch, sq, heads, dv)
+    assert_fa_close(out, out_ref, out_pt, name="v3_mla_kvcache_metadata_out")
+
+
+@pytest.mark.golden_api("flash_attn_with_kvcache")
+@skip_unless_910_mla
+def test_v3_mla_decode_non_target_shape_uses_generic_path():
+    case = ("decode", torch.bfloat16, 1, 4, 4096, 32, 1, 64, 512, False)
+    _, _, batch, sq, sk, heads, _, _, dv, is_causal = case
+    scale = _mla_scale(case)
+    q, k, v, qv = _mla_inputs(case)
+    out_ref, _, out_pt, _ = _mla_golden(case, q, k, v, qv, scale)
+
+    out = flash_attn_with_kvcache(
+        q,
+        k,
+        v,
+        qv=qv,
+        cache_seqlens=sk,
+        softmax_scale=scale,
+        causal=is_causal,
+        num_splits=0,
+    )
+    assert tuple(out.shape) == (batch, sq, heads, dv)
+    assert_fa_close(out, out_ref, out_pt, name="v3_mla_non_target_kvcache_out")

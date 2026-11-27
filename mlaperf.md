@@ -23,12 +23,8 @@ candidate FAInfer kernel time / same-layout FIA kernel time <= 1.05
 测试设备为 Ascend 910B3，CANN 9.2.0。benchmark 只统计设备计算内核时间，
 不包含 Python wrapper、host launch、metadata AICPU 和 workspace 初始化时间。
 
-本轮验收只针对 generic `FAInfer`，不包含 absorbed-MLA `MlaDecodeGemv`
-快速路径。benchmark 通过以下环境变量显式关闭 GEMV：
-
-```python
-os.environ["FLASH_ATTN_DISABLE_MLA_DECODE_GEMV"] = "1"
-```
+本轮验收只针对 generic `FAInfer`。`MlaDecodeGemv` 已从 host、metadata 和
+dispatch 的可达路径中下线，相关内核源码暂时保留。
 
 ## 2. 用户场景
 
@@ -42,8 +38,8 @@ causal:  true
 ```
 
 MLA prefill 使用普通 `q/k/v`，QK head dim 为 192，V head dim 为 128。
-prefill 不启用 decode compact L1。FA3 prefill 保持静态 512-token 容量；
-FA4 prefill 使用 384-token 静态布局，并已通过完整 prefill 功能与性能验证。
+prefill 不启用 decode compact L1，FA3/FA4 prefill 均保持静态 512-token
+容量。384-token stack 仅用于目标 MLA decode。
 
 ### 2.2 Decode
 
@@ -77,11 +73,11 @@ groupSize = 32
 qNBlockTile = 32
 ```
 
-此时任务数过少，单个 block 的工作量和流水过长。现在对 `qSeqlen == 1`
-增加上限：
+此时任务数过少，单个 block 的工作量和流水过长。目标 MLA shape 下对
+QN tile 增加上限：
 
 ```cpp
-if (qSeqlen == 1U) {
+if (mlaDecodePerf) {
     qNBlockTile = min(qNBlockTile, 16U);
 }
 ```
@@ -102,7 +98,9 @@ if (qSeqlen == 1U) {
 
 ### 3.2 KV stack
 
-decode 的 `KV=1025` 使用 384-token stack：
+目标 MLA decode
+（`Sq=1、Hq=32、Hkv=1、Dq=64、Dv=512`）的 `KV=1025` 使用
+384-token stack：
 
 ```text
 [0, 384), [384, 768), [768, 1025)
@@ -125,7 +123,8 @@ FA3 和 FA4 的容量处理略有不同：
 
 - FA3 保留全局编译期 `MAX_KV_STACK_LEN=512`，只在 decode FD 实例中使用
   运行时 `kvStackLen=384`。这保证 prefill 的 causal softmax 静态缓冲不变。
-- FA4 当前使用 `MAX_KV_STACK_LEN=384`，prefill 已通过完整功能与性能验证。
+- FA4 保留全局 `MAX_KV_STACK_LEN=512`，只在目标 MLA decode 任务中使用
+  运行时 `kvStackLen=384`；workspace 仍按 512 上界分配。
 
 ### 3.3 launch block 数
 
@@ -171,7 +170,7 @@ num_splits=0
 最初 FA3 的 flash-decode 只在 paged + varlen 组合下启用，dense MLA decode
 无法使用 KV 分核。
 
-现在 FA3 的 FD 选择规则为：
+目标 MLA shape 的 dense FD 选择规则为：
 
 ```text
 num_splits != 1
@@ -232,28 +231,10 @@ stage 3 -> EVENT_ID6
 
 这样避开 QK 的 K ping-pong event 0/1 及 P 使用的 event 4。
 
-### 4.4 benchmark LSE 开关
+### 4.4 LSE 输出
 
-benchmark 通过：
-
-```python
-os.environ["FLASH_ATTN_BENCH_SKIP_LSE"] = "1"
-```
-
-对 decode 使用 `LseModeT::NONE`，不再输出最终全局 LSE。
-
-FA3 将该开关限制在 `seqlen_q == 1`：
-
-```cpp
-fwd_args.skip_lse =
-    seqlen_q == 1 && std::getenv("FLASH_ATTN_BENCH_SKIP_LSE") != nullptr;
-```
-
-原因是 FA3 prefill 的 causal LSE/softmax 路径与 decode 不同，不能让该
-benchmark 开关影响 prefill。
-
-注意：FD split 中间仍必须生成 partial LSE，因为 combine 需要按各 split
-的 LSE 进行数值稳定的重缩放。`NONE` 只省去最终全局 LSE 输出。
+benchmark-only 的最终 LSE 跳过开关已删除。FA3/FA4 始终输出最终全局
+LSE；FD split 中间仍生成 partial LSE，供 combine 做数值稳定的重缩放。
 
 ## 5. FA4 特殊处理
 
@@ -509,7 +490,8 @@ V:             96 KiB
 合计:         288 KiB
 ```
 
-FA4 prefill 的 V stack 为 384 token；FA3 prefill 保持 512 token。
+FA3/FA4 prefill 的 V stack 均保持 512 token；目标 MLA decode 使用运行时
+384-token stack。
 
 ### 6.9 L0 与 workspace 边界
 
@@ -555,10 +537,10 @@ shape 下无需依赖动态 host 读取。
 
 `bench_mla_vs_fia.py` 做以下调整：
 
-1. 关闭 `MlaDecodeGemv` 形状分派，确保测到 generic FAInfer。
+1. `MlaDecodeGemv` 不可达，benchmark 直接测 generic FAInfer。
 2. `FA_COMPUTE_PATTERNS` 只保留 `"FAInfer"`。
 3. 所有 candidate 显式使用 `num_splits=0`。
-4. benchmark decode 通过环境变量关闭最终 LSE 输出。
+4. benchmark decode 保留最终 LSE 输出，和实际算子行为一致。
 
 最终 FIA 只匹配：
 

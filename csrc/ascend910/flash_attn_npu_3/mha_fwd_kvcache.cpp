@@ -42,6 +42,7 @@ class FAInferKernel {
   public:
     bool hasSeqUsedQ = false;
     bool hasSeqUsedKv = false;
+    bool mlaDecodePerf = false;
     using ArchTag = typename BlockMmadQK::ArchTag;
     using L1TileShape = typename BlockMmadQK::L1TileShape;
     using ElementQ = typename BlockMmadQK::ElementA;
@@ -295,6 +296,9 @@ class FAInferKernel {
 
         uint32_t coreIdx = AscendC::GetBlockIdx();
         uint32_t coreNum = AscendC::GetBlockNum();
+        mlaDecodePerf = mlaAbsorbed && maxQSeqlen == MlaDecodePerf::kSeqlenQ && qHeads == MlaDecodePerf::kQHeads &&
+                        kvHeads == MlaDecodePerf::kKvHeads && embed == MlaDecodePerf::kQHeadDim &&
+                        embedV == MlaDecodePerf::kVHeadDim;
 #ifdef __DAV_C220_CUBE__
         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
@@ -318,8 +322,8 @@ class FAInferKernel {
         const bool headDimSplit = embedQK > NUM_256;
         groupSize = qHeads / kvHeads;
         const bool compactDecodeL1 =
-            !PAGED_CACHE_FLAG && embedV == 512U && kvNewSeqlen == 0U && maxQSeqlen * groupSize <= 64U;
-        kvStackLen = FLASH_DECODE_FLAG ? 384U : MAX_KV_STACK_LEN;
+            mlaDecodePerf && !PAGED_CACHE_FLAG && kvNewSeqlen == 0U;
+        kvStackLen = (FLASH_DECODE_FLAG && mlaDecodePerf) ? MlaDecodePerf::kKvStackLen : MAX_KV_STACK_LEN;
         uint32_t kDynNum = NUM_256;
         uint32_t nDynNum = L1_D512_KV_TILE;
         uint32_t qL1DynNum = RoundUp(embedQK, FaiKenel::BLOCK_SIZE);
@@ -346,7 +350,7 @@ class FAInferKernel {
             vSegLen = kvStackLen;
             vSliceWidth = embedV;
         } else if (compactDecodeL1) {
-            const uint32_t qNBlockTile = GetQNBlockTile(maxQSeqlen, groupSize);
+            const uint32_t qNBlockTile = GetQNBlockTile(maxQSeqlen, groupSize, mlaDecodePerf);
             qL1Rows = RoundUp(qNBlockTile * maxQSeqlen, FaiKenel::BLOCK_SIZE);
             pL1Rows = qL1Rows;
             pL1Stages = 1U;
@@ -451,7 +455,7 @@ class FAInferKernel {
                     // Per batch KV length including the appended new KV, reused by every task
                     kvSeqlenCur += (kvNewSeqlen != 0U ? kvNewSeqlen : 0U);
 
-                    uint32_t curQNBlockTileTmp = GetQNBlockTile(qSeqlenCur, groupSize);
+                    uint32_t curQNBlockTileTmp = GetQNBlockTile(qSeqlenCur, groupSize, mlaDecodePerf);
                     uint32_t qNBlockNumPerGroupTmp = CeilDiv(groupSize, curQNBlockTileTmp);
                     uint32_t curQNBlockNumTmp = qNBlockNumPerGroupTmp * kvHeads;
                     uint32_t curQSBlockTileTmp = GetQSBlockTile(kvSeqlenCur);
@@ -534,7 +538,7 @@ class FAInferKernel {
                     // GetQSBlockTile is a constant independent of kvSeqlen so the kv
                     // length is resolved in the cachedBatch gate below, not here. If this
                     // function ever becomes kv dependent move the kv resolution back.
-                    uint32_t curQNBlockTileTmp = GetQNBlockTile(qSeqlenCur, groupSize);
+                    uint32_t curQNBlockTileTmp = GetQNBlockTile(qSeqlenCur, groupSize, mlaDecodePerf);
                     uint32_t qNBlockNumPerGroupTmp = CeilDiv(groupSize, curQNBlockTileTmp);
                     uint32_t curQNBlockNumTmp = qNBlockNumPerGroupTmp * kvHeads;
                     uint32_t curQSBlockTileTmp = GetQSBlockTile(kvSeqlenCur);
@@ -551,7 +555,7 @@ class FAInferKernel {
                     }
                     // Per batch KV length including the appended new KV, reused by every task
                     kvSeqlenCur += (kvNewSeqlen != 0U ? kvNewSeqlen : 0U);
-                    uint32_t curQNBlockTileCur = GetQNBlockTile(qSeqlenCur, groupSize);
+                    uint32_t curQNBlockTileCur = GetQNBlockTile(qSeqlenCur, groupSize, mlaDecodePerf);
                     uint32_t qNBlockNumPerGroupCur = CeilDiv(groupSize, curQNBlockTileCur);
                     curQNBlockNumCur = qNBlockNumPerGroupCur * kvHeads;
                     curQSBlockNumCur = CeilDiv(qSeqlenCur, 128);
@@ -726,7 +730,7 @@ class FAInferKernel {
             lseHeadStride = maxQSeqlen;
         }
 
-        uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+        uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize, mlaDecodePerf);
         uint32_t qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
         uint32_t curQSBlockTile = GetQSBlockTile(kvSeqlen);
         uint32_t curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);

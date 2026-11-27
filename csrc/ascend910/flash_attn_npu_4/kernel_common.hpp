@@ -13,13 +13,15 @@
 #ifndef KERNEL_COMMON
 #define KERNEL_COMMON
 
+#include "../mla_decode_perf.h"
+
 namespace KernelCommon {
 constexpr uint32_t QK_READY_ID = 1;
 constexpr uint32_t SOFTMAX_READY_ID = 2;
 constexpr uint32_t PV_READY_ID = 3;
 constexpr uint32_t PRE_LAUNCH = 2;
 constexpr uint32_t N_SPLIT_HELPER = 2;
-constexpr uint32_t MAX_KV_STACK_LEN = 384;
+constexpr uint32_t MAX_KV_STACK_LEN = 512;
 constexpr uint32_t Q_TILE_CEIL = 128;
 constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = Q_TILE_CEIL * MAX_KV_STACK_LEN;
 constexpr uint32_t L1_MAX_SIZE = 524288;
@@ -103,12 +105,12 @@ struct FAIKernelParams {
     {}
 };
 
-__aicore__ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
+__aicore__ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, bool mlaDecodePerf = false)
 {
     uint32_t qNBlockTile = (qSeqlen != 0) ? (Q_TILE_CEIL / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER : Q_TILE_CEIL;
     qNBlockTile = qNBlockTile < groupSize ? qNBlockTile : groupSize;
-    if (qSeqlen == 1U) {
-        qNBlockTile = qNBlockTile < 16U ? qNBlockTile : 16U;
+    if (mlaDecodePerf) {
+        qNBlockTile = qNBlockTile < MlaDecodePerf::kQnTileCap ? qNBlockTile : MlaDecodePerf::kQnTileCap;
     }
     qNBlockTile = qNBlockTile < 1 ? 1 : qNBlockTile;
     return qNBlockTile;
@@ -122,16 +124,17 @@ __aicore__ inline uint32_t GetQSBlockTile(uint32_t kvSeqlen)
 
 __aicore__ inline uint32_t GetStackSeqTile(bool isNewBlock, uint32_t kvSIdx, uint32_t kvSIdxLocal,
                                            uint32_t kvLoopNumTotalNew, uint32_t kvSLoopNumTotalOld, int64_t noSkipKvS,
-                                           uint32_t kvSeqlenOld, uint32_t kvNewSeqlen)
+                                           uint32_t kvSeqlenOld, uint32_t kvNewSeqlen,
+                                           uint32_t kvStackLen = MAX_KV_STACK_LEN)
 {
     if (isNewBlock) {
-        return (kvSIdxLocal + 1 > kvLoopNumTotalNew - 1U) ? (kvNewSeqlen - kvSIdxLocal * MAX_KV_STACK_LEN)
-                                                          : MAX_KV_STACK_LEN;
+        return (kvSIdxLocal + 1 > kvLoopNumTotalNew - 1U) ? (kvNewSeqlen - kvSIdxLocal * kvStackLen)
+                                                          : kvStackLen;
     }
     if (kvSIdx + 1 > kvSLoopNumTotalOld - 1U) {
-        return AscendC::Std::min(noSkipKvS, (int64_t)kvSeqlenOld) - kvSIdx * MAX_KV_STACK_LEN;
+        return AscendC::Std::min(noSkipKvS, (int64_t)kvSeqlenOld) - kvSIdx * kvStackLen;
     }
-    return MAX_KV_STACK_LEN;
+    return kvStackLen;
 }
 } // namespace KernelCommon
 #endif

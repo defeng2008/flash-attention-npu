@@ -13,6 +13,7 @@
 #include "aicpu_api.h"
 #include "fa_metadata_args.h"
 #include "fa_split.h"
+#include "../mla_decode_perf.h"
 #include "tilingdata.h"
 #include <cstdint>
 
@@ -25,14 +26,14 @@ inline uint32_t CeilDiv(uint32_t a, uint32_t b)
     return (b == 0) ? 0 : (a + b - 1) / b;
 }
 
-inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
+inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, bool mlaDecodePerf)
 {
     uint32_t qNBlockTile = (qSeqlen != 0)
         ? (Q_TILE_CEIL / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER
         : Q_TILE_CEIL;
     qNBlockTile = qNBlockTile < groupSize ? qNBlockTile : groupSize;
-    if (qSeqlen == 1U) {
-        qNBlockTile = qNBlockTile < 16U ? qNBlockTile : 16U;
+    if (mlaDecodePerf) {
+        qNBlockTile = qNBlockTile < MlaDecodePerf::kQnTileCap ? qNBlockTile : MlaDecodePerf::kQnTileCap;
     }
     qNBlockTile = qNBlockTile < 1u ? 1u : qNBlockTile;
     return qNBlockTile;
@@ -79,6 +80,9 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV4(void *args)
     tilingData->workSpaceSize = fa_metadata::WorkSpaceSize(blockDim);
 
     const uint32_t groupSize = (metaArgs->numHeadsK == 0) ? 1u : (metaArgs->numHeads / metaArgs->numHeadsK);
+    const bool mlaDecodePerf =
+        MlaDecodePerf::MatchesShape(metaArgs->maxQSeqlen, metaArgs->numHeads, metaArgs->numHeadsK,
+                                    metaArgs->embeddingSize, metaArgs->embeddingSizeV);
     uint32_t totalTaskNum = 0;
     uint32_t firstBatchTaskNum = 0;
     for (uint32_t batchIdx = 0; batchIdx < metaArgs->batch; ++batchIdx) {
@@ -86,7 +90,7 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV4(void *args)
         if (metaArgs->isVarlen != 0) {
             qSeqlen = static_cast<uint32_t>(seqlensQ[batchIdx]);
         }
-        const uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+        const uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize, mlaDecodePerf);
         const uint32_t qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
         const uint32_t curQNBlockNum = qNBlockNumPerGroup * metaArgs->numHeadsK;
         const uint32_t curQSBlockTile = Q_TILE_CEIL;
@@ -135,6 +139,7 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV4(void *args)
             ctx.seqlens_k_cpu = cacheSeqlens;
             ctx.blockDim = bd;
             ctx.num_splits = static_cast<int32_t>(metaArgs->numSplits);
+            ctx.mlaDecodePerf = mlaDecodePerf;
             fa_split::splitBN2S1GS2(tilingData, ctx);
             tilingData->workSpaceSize = fa_metadata::WorkSpaceSize(static_cast<uint64_t>(bd))
                 + tilingData->splitLseTotalSize + tilingData->splitOTotalSize;

@@ -14,6 +14,7 @@
 #define KERNEL_COMMON
 
 #include "tilingdata.h"
+#include "../mla_decode_perf.h"
 
 namespace KernelCommon {
 constexpr uint32_t QK_READY_ID = 1;
@@ -110,12 +111,12 @@ struct FAIKernelParams {
     {}
 };
 
-__aicore__ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
+__aicore__ inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, bool mlaDecodePerf = false)
 {
     uint32_t qNBlockTile = (qSeqlen != 0) ? (Q_TILE_CEIL / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER : Q_TILE_CEIL;
     qNBlockTile = qNBlockTile < groupSize ? qNBlockTile : groupSize;
-    if (qSeqlen == 1U) {
-        qNBlockTile = qNBlockTile < 16U ? qNBlockTile : 16U;
+    if (mlaDecodePerf) {
+        qNBlockTile = qNBlockTile < MlaDecodePerf::kQnTileCap ? qNBlockTile : MlaDecodePerf::kQnTileCap;
     }
     qNBlockTile = qNBlockTile < 1 ? 1 : qNBlockTile;
     return qNBlockTile;

@@ -57,10 +57,8 @@ PERF_OUTPUTS = PERF_DIR / "perf_outputs"
 sys.path.insert(0, str(PERF_DIR.parents[2]))
 sys.path.insert(0, str(PERF_DIR))
 
-# This acceptance benchmark targets the generic FAInfer path. Keep the
-# comparison independent of the absorbed-MLA DecodeGemv fast path.
-os.environ["FLASH_ATTN_DISABLE_MLA_DECODE_GEMV"] = "1"
-os.environ["FLASH_ATTN_BENCH_SKIP_LSE"] = "1"
+# This acceptance benchmark targets the generic FAInfer path. GEMV is not
+# reachable and the kernel always emits the final LSE.
 
 from mla_user_scenarios import DECODE, PREFILL, scenario_summary  # noqa: E402
 

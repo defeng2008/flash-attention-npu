@@ -5,13 +5,14 @@
 
 #include <cstdint>
 #include "tilingdata.h"
+#include "../mla_decode_perf.h"
 
 namespace fa_split {
 
 constexpr uint32_t Q_TILE_CEIL = 128;
 constexpr uint32_t N_SPLIT_HELPER = 2;
 constexpr uint32_t MAX_KV_STACK_LEN = 512;
-constexpr uint32_t DECODE_KV_STACK_LEN = 384;
+constexpr uint32_t DECODE_KV_STACK_LEN = MlaDecodePerf::kKvStackLen;
 
 inline uint32_t FaMin(uint32_t a, uint32_t b)
 {
@@ -22,13 +23,13 @@ inline uint32_t FaMax(uint32_t a, uint32_t b)
     return a > b ? a : b;
 }
 
-inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
+inline uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, bool mlaDecodePerf = false)
 {
     uint32_t qRowNumCeil = Q_TILE_CEIL;
     uint32_t qNBlockTile = (qSeqlen != 0) ? (qRowNumCeil / qSeqlen) / N_SPLIT_HELPER * N_SPLIT_HELPER : Q_TILE_CEIL;
     qNBlockTile = FaMin(qNBlockTile, groupSize);
-    if (qSeqlen == 1U) {
-        qNBlockTile = FaMin(qNBlockTile, 16U);
+    if (mlaDecodePerf) {
+        qNBlockTile = FaMin(qNBlockTile, MlaDecodePerf::kQnTileCap);
     }
     qNBlockTile = FaMax(qNBlockTile, static_cast<uint32_t>(1));
     return qNBlockTile;
@@ -70,6 +71,8 @@ struct SplitContext {
     uint32_t blockDim;
     int32_t num_splits;
     int32_t kvNewSeqlen;
+    bool mlaDecodePerf = false;
+    bool flashDecodeFlag = false;
 };
 
 inline BatchParams getBatchParams(uint32_t bIdx, uint32_t groupSize, const SplitContext& ctx)
@@ -81,13 +84,13 @@ inline BatchParams getBatchParams(uint32_t bIdx, uint32_t groupSize, const Split
         p.qSeqlen = static_cast<uint32_t>(ctx.seqlen_q);
     }
     p.kvSeqlen = static_cast<uint32_t>(ctx.seqlens_k_cpu[bIdx] + ctx.kvNewSeqlen);
-    p.curQNBlockTile = GetQNBlockTile(p.qSeqlen, groupSize);
+    p.curQNBlockTile = GetQNBlockTile(p.qSeqlen, groupSize, ctx.mlaDecodePerf);
     p.qNBlockNumPerGroup = (groupSize + p.curQNBlockTile - 1) / p.curQNBlockTile;
     p.curQNBlockNum = p.qNBlockNumPerGroup * ctx.num_heads_k;
     p.curQSBlockTile = GetQSBlockTile(p.kvSeqlen);
     p.curQSBlockNum = (p.qSeqlen + p.curQSBlockTile - 1) / p.curQSBlockTile;
     p.curKSBlockTile =
-        (ctx.seqlen_q == 1 && ctx.num_splits != 1) ? DECODE_KV_STACK_LEN : MAX_KV_STACK_LEN;
+        (ctx.mlaDecodePerf && ctx.flashDecodeFlag) ? DECODE_KV_STACK_LEN : MAX_KV_STACK_LEN;
     // Per-phase S2 block count: old blocks + new blocks
     uint32_t kvSeqlenOld = static_cast<uint32_t>(p.kvSeqlen - ctx.kvNewSeqlen);
     uint32_t kvSBlockNumOld = (kvSeqlenOld + p.curKSBlockTile - 1) / p.curKSBlockTile;

@@ -558,7 +558,7 @@ class MlaDecodeGemvKernel {
         updateSize = tilingData->UpdateSize;
         batch = tilingData->batch;
         qHeads = tilingData->numHeads;
-        kvHeads = 1;                 // D2: 闸门 IsMlaDecodeGemvShape 保证 numHeadsK==1
+        kvHeads = 1;                 // D2: GEMV 内核要求 numHeadsK==1
         embed = MLA_DECODE_ROPE_DIM; // D2: 闸门保证 headSizeOg+headSizeV==576 && headSizeV==512
         embedV = MLA_DECODE_LATENT_DIM;
         embedQK = MLA_DECODE_QK_DIM;

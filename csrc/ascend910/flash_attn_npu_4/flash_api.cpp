@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -15,6 +14,7 @@
 // FAInferTilingData (tilingdata.h), the FaiKenel enum (kernel_common.hpp),
 // the fa_split host helper, and FAG tiling (fag_tiling.cpp) for mha_bwd.
 #include "tilingdata.h"
+#include "../mla_decode_perf.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
@@ -76,18 +76,6 @@ static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args, const at::Tensor
         c10_npu::NPUCachingAllocator::recordStream(seqlensQ->storage().data_ptr(), currentStream);
     }
     return meta;
-}
-
-// MLA absorbed decode: 1 q token/seq, 1 KV head, latent v=512, rope=64;
-// paged KV, windows and causal masks keep the generic FAInfer path.
-inline bool IsMlaDecodeGemvShape(bool has_q_v, int64_t num_heads, int64_t num_heads_k, int64_t head_size_og,
-                                 int64_t head_size_v, bool paged_KV, bool is_local, bool is_causal, int64_t seqlen_q)
-{
-    if (std::getenv("FLASH_ATTN_DISABLE_MLA_DECODE_GEMV") != nullptr) {
-        return false;
-    }
-    return has_q_v && num_heads <= 32 && num_heads_k == 1 && head_size_v == 512 && head_size_og + head_size_v == 576 &&
-           !paged_KV && !is_local && !is_causal && seqlen_q == 1;
 }
 
 std::vector<at::Tensor> mha_fwd(
@@ -353,9 +341,9 @@ std::vector<at::Tensor> mha_fwd(
         return {out, softmaxlse};
     }
 
-    const bool mlaDecodeGemvShape = IsMlaDecodeGemvShape(has_q_v, num_heads, num_heads_k, head_size_og, head_size_v,
-                                                         paged_KV, is_local, is_causal, seqlen_q);
-    const bool use_explicit_metadata = scheduler_metadata_.has_value() && !mlaDecodeGemvShape;
+    const bool mlaDecodePerfShape =
+        has_q_v && MlaDecodePerf::MatchesShape(seqlen_q, num_heads, num_heads_k, head_size_og, head_size_v);
+    const bool use_explicit_metadata = scheduler_metadata_.has_value();
     int32_t* seqlens_q_cpu = nullptr;
     at::Tensor seqlens_q_cpu_tensor;
     at::Tensor seqlens_k_cpu_tensor;
@@ -464,13 +452,13 @@ std::vector<at::Tensor> mha_fwd(
         const int64_t wsSplit = partialRowsUpper * (static_cast<int64_t>(head_size_v) + 1) * sizeof(float);
         workspace_tensor = at::empty({wsBase + wsSplit}, at::device(at::kPrivateUse1).dtype(at::kByte));
         launchBlockDim = blockDim;
-        if (!mlaDecodeGemvShape && seqlen_q == 1 && !is_local) {
+        if (mlaDecodePerfShape && !is_local) {
             const uint32_t groupSize = static_cast<uint32_t>(num_heads / num_heads_k);
-            const uint32_t qNBlockTile = fa_split::GetQNBlockTile(1U, groupSize);
+            const uint32_t qNBlockTile = fa_split::GetQNBlockTile(1U, groupSize, true);
             const uint32_t qNBlocks = (groupSize + qNBlockTile - 1U) / qNBlockTile;
+            const uint32_t kvStackLen = MlaDecodePerf::kKvStackLen;
             const uint32_t kvBlocks =
-                (static_cast<uint32_t>(declared_k) + fa_split::MAX_KV_STACK_LEN - 1U) /
-                fa_split::MAX_KV_STACK_LEN;
+                (static_cast<uint32_t>(declared_k) + kvStackLen - 1U) / kvStackLen;
             uint32_t kvSegments = 1U;
             if (num_splits != 1) {
                 kvSegments = num_splits > 1 ? std::min<uint32_t>(num_splits, kvBlocks) : kvBlocks;
@@ -539,7 +527,7 @@ std::vector<at::Tensor> mha_fwd(
                 qSeqlen = *(seqlens_q_cpu + batchIdx);
             }
             uint64_t kvSeqlen = *(seqlens_k_cpu + batchIdx);
-            uint64_t curQNBlockTile = fa_split::GetQNBlockTile(qSeqlen, groupSize);
+            uint64_t curQNBlockTile = fa_split::GetQNBlockTile(qSeqlen, groupSize, mlaDecodePerfShape);
             uint64_t qNBlockNumPerGroup = (groupSize + curQNBlockTile - 1) / curQNBlockTile;
             uint64_t curQNBlockNum = qNBlockNumPerGroup * num_heads_k;
             uint64_t curQSBlockTile = fa_split::GetQSBlockTile(kvSeqlen);
@@ -585,17 +573,8 @@ std::vector<at::Tensor> mha_fwd(
         splitCtx.seqlens_k_cpu = seqlens_k_cpu;
         splitCtx.blockDim = blockDim;
         splitCtx.num_splits = static_cast<int32_t>(num_splits);
-        if (mlaDecodeGemvShape) {
-            // The gemv kernel splits the KV cache into 128-token tiles itself;
-            // generic flash-decode tiling does not apply and would fight it.
-            flashDecodeFlag = false;
-            tiling_cpu_ptr->set_flashDecodeFlag(0U);
-            fa_split::splitKvForGemvDecode(tiling_cpu_ptr, splitCtx);
-            auto needCoreNum = tiling_cpu_ptr->get_needCoreNum();
-            if (needCoreNum != 0) {
-                launchBlockDim = needCoreNum;
-            }
-        } else if (flashDecodeFlag) {
+        splitCtx.mlaDecodePerf = mlaDecodePerfShape;
+        if (flashDecodeFlag) {
             fa_split::splitBN2S1GS2(tiling_cpu_ptr, splitCtx);
             auto needCoreNum = tiling_cpu_ptr->get_needCoreNum();
             if (needCoreNum != 0) {
@@ -611,17 +590,12 @@ std::vector<at::Tensor> mha_fwd(
         uint64_t UpdateSize = static_cast<uint64_t>(blockDim) * WORKSPACE_BLOCK_SIZE_DB * 4 * PRELANCH_NUM;
         uint64_t splitLseTotalSize = tiling_cpu_ptr->get_splitLseTotalSize();
         uint64_t splitOTotalSize = tiling_cpu_ptr->get_splitOTotalSize();
-        // The gemv kernel keeps scratch tables at the workspace front; its FD
-        // partials live past them; generic path keeps partials at offset 0.
-        uint64_t partialBase = mlaDecodeGemvShape ? (mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize) : 0U;
         int64_t workSpaceSize = static_cast<int64_t>(mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize +
                                                      splitLseTotalSize + splitOTotalSize);
 
         workspace_tensor = at::empty({workSpaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
         // Empty FD splits never write partials; init like FA GPU (O=0, LSE=-inf).
-        // The gemv path shares this contract for its split batches (its gate
-        // is cleared for it, so test the gemv gate separately).
-        if ((flashDecodeFlag || mlaDecodeGemvShape) && (splitLseTotalSize > 0 || splitOTotalSize > 0)) {
+        if (flashDecodeFlag && (splitLseTotalSize > 0 || splitOTotalSize > 0)) {
             auto float_opts = workspace_tensor.options().dtype(at::kFloat);
             if (splitLseTotalSize > 0) {
                 TORCH_CHECK(splitLseTotalSize % sizeof(float) == 0,
@@ -629,7 +603,7 @@ std::vector<at::Tensor> mha_fwd(
                 at::Tensor lse_init = at::full({static_cast<int64_t>(splitLseTotalSize / sizeof(float))},
                                                -std::numeric_limits<float>::infinity(), float_opts);
                 workspace_tensor
-                    .narrow(/*dim=*/0, static_cast<int64_t>(partialBase), static_cast<int64_t>(splitLseTotalSize))
+                    .narrow(/*dim=*/0, static_cast<int64_t>(0), static_cast<int64_t>(splitLseTotalSize))
                     .copy_(lse_init.view(at::kByte));
             }
             if (splitOTotalSize > 0) {
@@ -637,7 +611,7 @@ std::vector<at::Tensor> mha_fwd(
                             "splitOTotalSize must be a multiple of sizeof(float)");
                 at::Tensor o_init = at::zeros({static_cast<int64_t>(splitOTotalSize / sizeof(float))}, float_opts);
                 workspace_tensor
-                    .narrow(/*dim=*/0, static_cast<int64_t>(partialBase + splitLseTotalSize),
+                    .narrow(/*dim=*/0, static_cast<int64_t>(splitLseTotalSize),
                             static_cast<int64_t>(splitOTotalSize))
                     .copy_(o_init.view(at::kByte));
             }
@@ -708,8 +682,6 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.is_local = is_local;
     fwd_args.flashDecodeFlag = flashDecodeFlag;
     fwd_args.has_softcap = has_softcap;
-    fwd_args.mlaDecodeGemv = mlaDecodeGemvShape;
-    fwd_args.skip_lse = std::getenv("FLASH_ATTN_BENCH_SKIP_LSE") != nullptr;
     fwd_args.layout = is_bnsd_layout ? FaiKenel::inputLayout::BNSD
                                      : (is_tnd_layout ? FaiKenel::inputLayout::TND : FaiKenel::inputLayout::BSND);
     fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;

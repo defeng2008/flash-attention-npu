@@ -14,7 +14,6 @@ from tests.common.test_utils import (
     make_block_table,
     make_cu_seqlens,
     make_golden_attention_mask,
-    make_local_attention_mask,
     make_packed_random_tensor,
     make_paged_kv_cache,
     make_padded_varlen_mask,
@@ -2231,3 +2230,17 @@ def test_v4_mla_flash_attn_varlen_func(case):
     )
     assert tuple(out.shape) == (sq, heads, dv)
     assert_fa_close(out, out_ref[0], out_pt[0], name="v4_mla_varlen_out")
+
+
+@pytest.mark.golden_api("flash_attn_func")
+@skip_unless_910_mla
+def test_v4_mla_decode_non_target_shape_uses_generic_path():
+    case = ("decode", torch.bfloat16, 1, 4, 4096, 32, 1, 64, 512, False)
+    _, _, batch, sq, _, heads, _, _, dv, is_causal = case
+    scale = _mla_scale(case)
+    q, k, v, qv = _mla_inputs(case)
+    out_ref, _, out_pt, _ = _mla_golden(case, q, k, v, qv, scale)
+
+    out = flash_attn_func(q, k, v, qv=qv, softmax_scale=scale, causal=is_causal, num_splits=0)
+    assert tuple(out.shape) == (batch, sq, heads, dv)
+    assert_fa_close(out, out_ref, out_pt, name="v4_mla_non_target_func_out")
