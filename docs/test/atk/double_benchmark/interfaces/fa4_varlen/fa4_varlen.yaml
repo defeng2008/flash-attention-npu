@@ -1,5 +1,5 @@
 # fa4_varlen.yaml —— flash_attn_npu_4.flash_attn_varlen_func 的 ATK 用例设计文件
-# 类别：double_benchmark（npu 候选 vs GPU(daoailab) + CPU 双标杆精度对比）
+# 类别：double_benchmark（npu 候选 vs CPU fp32 + fp16 双标杆精度对比）
 #
 # 这份 yaml 是本接口的**唯一真值**，用例不再手写，而是由 run 脚本现场生成：
 #   atk case -f fa4_varlen.yaml -p . -s <seed>
@@ -15,13 +15,9 @@
 #       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）
 #       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）
 #
-# GPU 标杆限定：官方 FA4 cute 在 H200(SM90) 上只支持 head_dim_v<=128，
-# decode 吸收态(dv=512) 无法运行，故本类别只出 prefill 形状；
-# decode 的覆盖见 single_benchmark_cpu / single_benchmark_cann。
-#
 # 生成后每条用例的形状（钩子改写之后；TND 按单序列打包）：
 #   TND prefill  : q[Tq,32,192]  k[Tk,32,192]  v[Tk,32,128]  cu_seqlens_x=[0,Tx]
-#   paged        : KV 变 [num_blocks,128,H,D]，另加 page_table（页表写成连续块）
+#   TND decode   : q[Tq,32,64]   qv[Tq,32,512] k[Tk,1,64]    v[Tk,1,512]
 name: flash_attn_npu_4.flash_attn_varlen_func
 api: pytorch
 api_type: fa4_varlen_mla_accuracy
@@ -59,7 +55,7 @@ inputs:
       dim_values:
         - values: [1, 64, 198, 512]
         - values: [32]
-        - values: [192]
+        - values: [64, 192]
     ranges:
       valid:
         values: [[-5.0, 5.0]]
@@ -73,7 +69,7 @@ inputs:
       dim_values:
         - values: [1, 64, 198, 256, 384, 512, 1025]
         - values: [1, 32]
-        - values: [192]
+        - values: [64, 192]
     ranges:
       valid:
         values: [[-5.0, 5.0]]
@@ -87,7 +83,21 @@ inputs:
       dim_values:
         - values: [1, 64, 198, 256, 384, 512, 1025]
         - values: [1, 32]
-        - values: [128]
+        - values: [128, 512]
+    ranges:
+      valid:
+        values: [[-5.0, 5.0]]
+  # qv: 吸收态专用 [total_q, Hq, 512]；prefill 用例会被钩子摘掉
+  - name: qv
+    type: tensor
+    required: false
+    dtypes: {values: [bf16, fp16]}
+    shapes:
+      dim_numbers: {values: [3]}
+      dim_values:
+        - values: [1, 64, 198, 512]
+        - values: [32]
+        - values: [512]
     ranges:
       valid:
         values: [[-5.0, 5.0]]

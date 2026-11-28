@@ -1,5 +1,5 @@
 # fa3_kvcache.yaml —— flash_attn_npu_3.flash_attn_with_kvcache 的 ATK 用例设计文件
-# 类别：double_benchmark（npu 候选 vs GPU(daoailab) + CPU 双标杆精度对比）
+# 类别：double_benchmark（npu 候选 vs CPU fp32 + fp16 双标杆精度对比）
 #
 # 这份 yaml 是本接口的**唯一真值**，用例不再手写，而是由 run 脚本现场生成：
 #   atk case -f fa3_kvcache.yaml -p . -s <seed>
@@ -18,7 +18,6 @@
 # 生成后每条用例的形状（钩子改写之后）：
 #   BSND prefill : q[B,Sq,32,192]  k[B,Sk,32,192]   v[B,Sk,32,128]
 #   BSND decode  : q[B,Sq,32,64]   qv[B,Sq,32,512]  k[B,Sk,1,64]  v[B,Sk,1,512]
-#   paged        : KV 变 [num_blocks,128,H,D]，另加 page_table（页表写成连续块）
 name: flash_attn_npu_3.flash_attn_with_kvcache
 api: pytorch
 api_type: fa3_kvcache_mla_accuracy

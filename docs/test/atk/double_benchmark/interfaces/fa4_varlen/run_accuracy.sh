@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# double_benchmark —— npu 候选 vs GPU(daoailab) + CPU 双标杆精度对比
+# double_benchmark —— npu 候选 vs CPU fp32 + fp16 双标杆精度对比
 #
 # 流程（yaml 是唯一真值，用例全部由 atk case 生成、不再手写）：
 #   1) atk case -f <stem>.yaml -p .  ->  result/<stem>/json/all_<stem>.json
@@ -43,9 +43,9 @@ INTERFACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERFACE_NAME="$(basename "${INTERFACE_DIR}")"
 DELIVERY_DIR="$(cd "${INTERFACE_DIR}/../../.." && pwd)"
 CASE_DIR="${DELIVERY_DIR}/double_benchmark/cases"
-NODES_FILE="nodes_accuracy_gpu.yaml"
+NODES_FILE="nodes_accuracy_cpu.yaml"
 SEED="${ATK_SEED:-20261113}"
-if [ "multi" = "multi" ]; then _SP=""; else _SP="--single_process"; fi
+_SP="--single_process"
 
 mkdir -p "${CASE_DIR}"
 cd "${INTERFACE_DIR}"

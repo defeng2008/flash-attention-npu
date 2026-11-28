@@ -1,0 +1,19 @@
+# 双 CPU 标杆（同机，无需 GPU）：
+#   * fp16 节点：低精度标杆（P=exp 按用例 dtype 量化、fp32 累加、输出用例 dtype），
+#     它相对 fp32 的误差就是 double_benchmark 的判据分母（Benchmark_*）；
+#   * fp32 节点：纯 fp32 标杆（P 不量化、过程 fp32、输出回落用例 dtype），是 ATK 的
+#     cpu_benchmark（Actual_* 的参照）。
+# ATK 只给同组最后一个节点建 benchmark 任务（--bm_device cpu -> cpu_benchmark），所以 fp32
+# 必须放在最后；同时给它 is_compare: false —— 否则报告里会多出一行「fp32 vs 自己」，分母
+# 恒为 0，候选的 bf16 舍入误差会被放大成几百倍比例而误判失败（实测通过率仅 6%）。
+nodes:
+  - backend: npu
+    devices: [0]
+    task: [accuracy]
+  - backend: cpu
+    name: fp16
+    task: [accuracy]
+  - backend: cpu
+    name: fp32
+    task: [accuracy]
+    is_compare: false

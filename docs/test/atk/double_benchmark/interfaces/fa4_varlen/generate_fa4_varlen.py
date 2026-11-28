@@ -125,17 +125,4 @@ class Fa4VarlenConstraints(CaseGenerator):
             _fixed(ins["seqused_k"], [kv_len] * batch_pt, shape=[batch_pt])
         if "cache_seqlens" in ins:
             ins["cache_seqlens"].range_values = kv_len
-
-        # ---- 用例级判据覆盖：本接口的全部 prefill -------------------------------------
-        # 官方 GPU(FA4 CuTe) 标杆在部分 prefill 用例上的最坏相对误差比候选/CPU 标杆更小，
-        # 而 max_re_ratio = 候选最坏单元相对误差 / 标杆最坏单元相对误差，两个标杆的最坏单元
-        # 不在同一量级时该比值天然放大（实测 id 11：候选与 fp32 CPU 标杆的最坏相对误差逐位
-        # 相同 = 0.8161180019378662，GPU 标杆仅 0.39152225852012634，比值 2.0845 刚好越界，
-        # 与本候选内核精度无关）。fa4_varlen 在 double_benchmark 里只出 prefill，故对全部
-        # prefill 把 max 门限放宽到 20（对齐 atk_summary 的「A·边际 (2,20] / B·大误差 (>20)」
-        # 分档边界，仍拦截大误差档），avg/rms 仍按 1.2 判定；decode（如后续新增）保持 2.0。
-        if not decode:
-            # standard 是跨用例共享的对象，必须深拷贝后再改，否则会污染全部用例
-            case_config.standard = case_config.standard.model_copy(deep=True)
-            case_config.standard.acc["cv_fused_double_benchmark"]["max_re_ratio"] = 20.0
         return case_config

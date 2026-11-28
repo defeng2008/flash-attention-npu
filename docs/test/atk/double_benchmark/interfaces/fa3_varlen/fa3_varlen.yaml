@@ -1,5 +1,5 @@
 # fa3_varlen.yaml —— flash_attn_npu_3.flash_attn_varlen_func 的 ATK 用例设计文件
-# 类别：double_benchmark（npu 候选 vs GPU(daoailab) + CPU 双标杆精度对比）
+# 类别：double_benchmark（npu 候选 vs CPU fp32 + fp16 双标杆精度对比）
 #
 # 这份 yaml 是本接口的**唯一真值**，用例不再手写，而是由 run 脚本现场生成：
 #   atk case -f fa3_varlen.yaml -p . -s <seed>

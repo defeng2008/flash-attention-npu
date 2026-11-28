@@ -14,25 +14,28 @@ Run:  python3 docs/test/atk/tools/gen_atk_mla.py
     现场生成到 result/<stem>/json/all_<stem>.json，run_*.sh 再把它拷进 cases/。
   * 跨输入的形状耦合由同目录的 generate_<iface>.py 钩子在每条用例上统一改写，
     所以 yaml 只描述"每一维的候选取值"，不需要（也不可能）写死组合。
-  * 用户场景 anchor（usershape.txt 的 198 prefill / 1025 decode）单独放在
-    cases/user_scenarios_<base>.json，由 run_*.sh 串跑，报告与生成用例分开。
-  * gpu_mem_compare 不出用户场景 anchor：小 shape 的显存峰值被 MLA 的固定 workspace
-    主导，与放大后的生成用例口径不一致，故该类别既不生成也不串跑 anchor。
+  * 所有套件都不出用户场景 anchor（2026-11-26 起统一移除，用例全部来自 yaml 生成）。
   * gpu_mem_compare 的标杆是 CANN npu_fused_infer_attention_score（与候选同机的 npu 节点，
     不再是 GPU），FIA 没有 page_table / window_size 入参，故该类别不出 paged 变体、
     yaml 也不声明 window_size；形状与判据沿用原设计。
+  * double_benchmark 用**同机双 CPU 标杆**，不再依赖 GPU 主机：
+      - cpu 节点 name=fp16：低精度标杆（P=exp 按用例 dtype 量化、fp32 累加、输出用例 dtype），
+        它相对 fp32 的误差就是判据分母（Benchmark_*）；
+      - cpu 节点 name=fp32：纯 fp32 标杆（P 不量化、过程 fp32、输出回落用例 dtype）。ATK 只给
+        同组**最后一个**节点建 benchmark 任务（--bm_device cpu → cpu_benchmark，即 Actual 的
+        参照），所以 fp32 必须放在最后，并加 is_compare: false 把它排除在比对行之外：否则报告
+        会多出一行「fp32 vs 自己」，分母恒 0、比例爆到几百倍而误判失败（实测通过率仅 6%）。
+    double_benchmark 的 fa4 与 fa3 一样覆盖 prefill + decode。
   * gpu_mem_compare 的用例要落在「输入+输出 500MiB~700MiB」才走 L2 豁免通道；prefill 与
     decode 共用同一个序列维候选，而同 Sq 下 decode 体积是 prefill 的 1.73 倍，故该类别
     的钩子把 decode 的序列长度**固定**为 4096（BSND）/ 8192（TND）来保证两者都落在区间内。
 """
-import json
 import os
 from pathlib import Path
 
 ROOT = Path("/home/w00811046/code/fan/mlatest/flash-attention-npu/docs/test/atk")
 SCALE = 192 ** -0.5          # DeepSeek MLA softmax scale
 BLOCK = 128                  # paged KV block size
-BF16 = "bf16"
 # MLA 精度张量（q/k/v/qv/k_cache/v_cache）覆盖的精度；yaml 里渲染成 dtypes.values，
 # ATK 会为每个 dtype 各生成一条用例（索引/attr 输入不在此列，保持落单一 dtype）。
 PRECISIONS = ["bf16", "fp16"]
@@ -65,11 +68,11 @@ GPU_IMPORTS = {
 # category -> (kind, nodes file, run file, bm_device, task, multi, 说明)
 # dtype_numbers 决定每个 dtype 生成多少条用例，总条数 = dtype 个数 × dtype_numbers；
 # 只有 CANN 标杆保留每接口 200 条（2 个 dtype × 100）；
-# CPU/GPU 标杆（cpu / gpu）跑得慢，统一压到每接口 50 条（2 个 dtype × 25）。
+# CPU 标杆跑得慢，统一压到每接口 50 条（2 个 dtype × 25）。
 CATEGORIES = {
-    "double_benchmark": dict(kind="acc", nodes="nodes_accuracy_gpu.yaml", run="run_accuracy.sh",
-                             bm="cpu", task="accuracy", multi=True, dtype_numbers=25,
-                             desc="npu 候选 vs GPU(daoailab) + CPU 双标杆精度对比"),
+    "double_benchmark": dict(kind="acc", nodes="nodes_accuracy_cpu.yaml", run="run_accuracy.sh",
+                             bm="cpu", task="accuracy", multi=False, dtype_numbers=25,
+                             desc="npu 候选 vs CPU fp32 + fp16 双标杆精度对比"),
     "single_benchmark_cpu": dict(kind="acc", nodes="nodes_accuracy.yaml", run="run_accuracy.sh",
                                  bm="cpu", task="accuracy", multi=False, dtype_numbers=25,
                                  desc="npu 候选 vs CPU fp32 标杆精度对比"),
@@ -87,10 +90,11 @@ CATEGORIES = {
 CAT_ORDER = ["double_benchmark", "single_benchmark_cpu", "single_benchmark_cann", "gpu_mem_compare"]
 
 # fa4 只出 prefill 形状的类别：
-#   * double_benchmark：官方 FA4 cute 在 H200/SM90 上 dv 只能 <=128（decode 吸收态 dv=512 跑不了）。
 #   * gpu_mem_compare：形状沿用「fa4 只出 prefill」，与已验收的用例集合保持一致（decode 的序列
 #     长度钉长只对 fa3 三个接口生效，fa4 若出 decode 会超出 500~700MiB 区间）。
-FA4_PREFILL_ONLY_CATS = {"double_benchmark", "gpu_mem_compare"}
+# double_benchmark 已改为同机双 CPU 标杆，原 GPU 硬件限制（dv<=128）消失，fa4 与 fa3 一样
+# 覆盖 prefill + decode。
+FA4_PREFILL_ONLY_CATS = {"gpu_mem_compare"}
 
 
 def prefill_only(iface, cat):
@@ -137,17 +141,25 @@ NODES = {
   - backend: cpu
     task: [accuracy]
 """,
-    "nodes_accuracy_gpu.yaml": """nodes:
+    "nodes_accuracy_cpu.yaml": """# 双 CPU 标杆（同机，无需 GPU）：
+#   * fp16 节点：低精度标杆（P=exp 按用例 dtype 量化、fp32 累加、输出用例 dtype），
+#     它相对 fp32 的误差就是 double_benchmark 的判据分母（Benchmark_*）；
+#   * fp32 节点：纯 fp32 标杆（P 不量化、过程 fp32、输出回落用例 dtype），是 ATK 的
+#     cpu_benchmark（Actual_* 的参照）。
+# ATK 只给同组最后一个节点建 benchmark 任务（--bm_device cpu -> cpu_benchmark），所以 fp32
+# 必须放在最后；同时给它 is_compare: false —— 否则报告里会多出一行「fp32 vs 自己」，分母
+# 恒为 0，候选的 bf16 舍入误差会被放大成几百倍比例而误判失败（实测通过率仅 6%）。
+nodes:
   - backend: npu
     devices: [0]
     task: [accuracy]
   - backend: cpu
+    name: fp16
     task: [accuracy]
-  - backend: gpu
-    host: 192.168.0.100  # TODO: 改为 GPU 主机 IP
-    port: 9090
-    devices: [0]
+  - backend: cpu
+    name: fp32
     task: [accuracy]
+    is_compare: false
 """,
     "nodes_accuracy_cann.yaml": """# 候选 npu 与 FIA 标杆 npu 同设备；标杆节点带 is_bm，由 execute 按节点名判别。
 # 注意：不能给候选节点加 is_compare: false，否则 ATK 会把它排除在精度比对之外。
@@ -188,22 +200,32 @@ RUN = """#!/usr/bin/env bash
 #   1) atk case -f <stem>.yaml -p .  ->  result/<stem>/json/all_<stem>.json
 #   2) cp 到 <cat>/cases/all_<stem>.json（交付里可直接打开查看）
 #   3) atk task -c cases/all_<stem>.json ... 执行并产出精度/显存报告
-{anchor_doc}
 #
 # 环境约定：conda 环境 cann（已装 atk + atk_private_precision）/ CANN set_env.sh / TMPDIR
 set -euo pipefail
 
 export CONDA_ENV="${{ATK_CONDA_ENV:-cann}}"
-export CANN_ROOT="${{CANN_ROOT:-/home/w00811046/cann/cann-9.2.0-clean/ascend-toolkit}}"
-export TMPDIR="${{TMPDIR:-/home/w00811046/tmp}}"
+export TMPDIR="${{TMPDIR:-${{HOME:-/tmp}}/tmp}}"
+mkdir -p "${{TMPDIR}}"
 ATK="${{ATK_BIN:-atk}}"
 
 # 加载 CANN 运行环境（torch_npu 需要 libhccl.so 等）
-if [ -f "${{CANN_ROOT}}/set_env.sh" ]; then
+# CANN：优先用 CANN_ROOT；未设置则在常见位置探测含 set_env.sh 的目录
+if [ -z "${{CANN_ROOT:-}}" ]; then
+  for _d in "${{ASCEND_HOME:-}}" "${{HOME}}"/cann/*/ascend-toolkit \\
+            /usr/local/Ascend/ascend-toolkit/latest /usr/local/Ascend/ascend-toolkit/* \\
+            /home/*/cann/*/ascend-toolkit; do
+    if [ -n "${{_d}}" ] && [ -f "${{_d}}/set_env.sh" ]; then CANN_ROOT="${{_d}}"; break; fi
+  done
+fi
+if [ -n "${{CANN_ROOT:-}}" ] && [ -f "${{CANN_ROOT}}/set_env.sh" ]; then
   # shellcheck disable=SC1091
   source "${{CANN_ROOT}}/set_env.sh"
 else
-  echo "[warn] 未找到 ${{CANN_ROOT}}/set_env.sh，请用 CANN_ROOT 指定含 set_env.sh 的 CANN 目录" >&2
+  echo "[error] 找不到 CANN set_env.sh（torch_npu 依赖它）。请指定含 set_env.sh 的目录后重试：" >&2
+  echo "        export CANN_ROOT=/usr/local/Ascend/ascend-toolkit/latest   # 换成实际路径" >&2
+  echo "        查找：find / -name set_env.sh -path '*ascend-toolkit*' 2>/dev/null | head" >&2
+  exit 1
 fi
 # 已激活环境里有 atk 就直接用，否则经 conda run 进入 CONDA_ENV
 if command -v "${{ATK}}" >/dev/null 2>&1; then
@@ -218,7 +240,7 @@ DELIVERY_DIR="$(cd "${{INTERFACE_DIR}}/../../.." && pwd)"
 CASE_DIR="${{DELIVERY_DIR}}/{cat}/cases"
 NODES_FILE="{nodes}"
 SEED="${{ATK_SEED:-20261113}}"
-if [ "{tag}" = "multi" ]; then _SP=""; else _SP="--single_process"; fi
+_SP="--single_process"
 
 mkdir -p "${{CASE_DIR}}"
 cd "${{INTERFACE_DIR}}"
@@ -260,7 +282,6 @@ for stem in "${{STEMS[@]}}"; do
   run_case "${{CASE_DIR}}/all_${{stem}}.json"
 done
 
-{anchor}
 echo "[done] ${{INTERFACE_NAME}} ({cat}) -> ${{CASE_DIR}}"
 """
 
@@ -269,7 +290,11 @@ RUN_CAT = """#!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 for iface in {ifaces}; do
-  bash "${{HERE}}/interfaces/${{iface}}/{run}"
+  script="${{HERE}}/interfaces/${{iface}}/{run}"
+  # 子脚本若被传输/编辑工具转成 CRLF，先就地修正，否则 bash 会报
+  # "/usr/bin/env: 'bash\\r': No such file or directory"
+  if grep -q $'\\r' "${{script}}" 2>/dev/null; then sed -i 's/\\r$//' "${{script}}"; fi
+  bash "${{script}}"
 done
 """
 
@@ -422,6 +447,84 @@ class @@CLS@@(BaseApi):
 '''
 
 
+# double_benchmark 专用适配器：同机双 CPU 标杆，没有 gpu / fia 节点。
+#   * cpu 节点按节点名派发：name=fp32 -> 纯 fp32 标杆，其余 cpu 节点 -> 低精度标杆；
+#   * NPU 候选保持惰性导入（纯 CPU 机器上模块导入不应失败）。
+EXECUTE_DOUBLE = '''"""ATK cpu/npu adapter for @@IFACE@@ (@@CAT@@)."""
+
+import inspect
+import sys
+from pathlib import Path
+
+import torch
+
+_HERE = Path(__file__).resolve()
+sys.path.insert(0, str(_HERE.parent))
+for _parent in _HERE.parents:
+    if (_parent / "flash-attention-npu").is_dir():
+        sys.path.insert(0, str(_parent / "flash-attention-npu"))
+        break
+
+from atk.tasks.api_execute import register
+from atk.tasks.api_execute.base_api import BaseApi
+
+from benchmark_@@IFACE@@ import @@FN@@ as cpu_impl
+from benchmark_@@IFACE@@ import @@FN@@_fp32 as cpu_fp32_impl
+
+# nodes_accuracy_cpu.yaml 里 fp32 节点的 name（同组最后一个节点 = ATK 的 cpu_benchmark）
+FP32_NODE_NAME = "fp32"
+
+
+def _npu_fn():
+    """惰性导入 NPU 候选实现：CPU 标杆节点不应该依赖 torch_npu，
+    模块级导入会让 @register 在纯 CPU 机器上直接失败。"""
+    from @@NPU_PKG@@ import @@FN@@ as fn
+    return fn
+
+
+@register("@@API_TYPE@@")
+class @@CLS@@(BaseApi):
+    _NPU_ACCEPTED = None
+
+    @classmethod
+    def _npu_accepted(cls):
+        """NPU 入口参数集合：首次调用才导入 NPU 实现，纯 CPU 机器上模块导入不应失败。"""
+        if cls._NPU_ACCEPTED is None:
+            cls._NPU_ACCEPTED = set(inspect.signature(_npu_fn()).parameters)
+        return cls._NPU_ACCEPTED
+
+    @staticmethod
+    def _move(kw, dev):
+        return {n: (v.to(dev) if isinstance(v, torch.Tensor) else v) for n, v in kw.items()}
+
+    def _case_dtype(self):
+        """用例配置里精度张量（q）的 dtype（bf16/fp16），默认 bf16。
+
+        ATK 的 benchmark 任务会把 bf16/fp16 输入统一升到 fp32（InputDataset.get_benchmark_data），
+        标杆节点的输出随之为 fp32；而候选节点仍按用例原精度输出。比较器要求两侧 dtype
+        完全一致（base_compare.check_output_size），所以标杆结果必须按用例 dtype 回落。
+        """
+        inputs = getattr(getattr(self.task_result, "case_config", None), "inputs", None) or []
+        for entry in inputs:
+            if not isinstance(entry, list) and getattr(entry, "name", None) == "q":
+                name = str(getattr(entry, "dtype", "")).lower()
+                return {"fp16": torch.float16, "bf16": torch.bfloat16}.get(name, torch.bfloat16)
+        return torch.bfloat16
+
+    def __call__(self, input_data, with_output=False):
+        kw = dict(input_data.kwargs)
+        if self.device == "cpu":
+            # fp32 节点是纯 fp32 高精度标杆；其余 cpu 节点是低精度标杆（P 按用例 dtype 量化）
+            fn = cpu_fp32_impl if getattr(self, "name", "") == FP32_NODE_NAME else cpu_impl
+            return fn(**kw).to(self._case_dtype())
+        if self.device == "npu":
+            npu_fn = _npu_fn()
+            return npu_fn(**self._move({n: v for n, v in kw.items() if n in self._npu_accepted()},
+                                       f"npu:{self.device_id}"))
+        raise RuntimeError(f"Unsupported backend: {self.device}")
+'''
+
+
 # --------------------------------------------------------------------------------------
 # CPU golden benchmark
 # --------------------------------------------------------------------------------------
@@ -543,161 +646,155 @@ def @@FN@@(**kw):
 '''
 
 
-# --------------------------------------------------------------------------------------
-# case JSON builder
-# --------------------------------------------------------------------------------------
-def _tensor(name, dtype, shape, rng=(-5.0, 5.0), values=None):
-    """values 非空时改用 ATK 的 *_fixed 数据类型，把张量内容固定为给定值。
+# double_benchmark 的双 CPU 标杆：同一个文件里给两个入口，execute 按节点名派发。
+#   * @@FN@@      —— 低精度标杆（P 按用例 dtype 量化、fp32 累加、输出用例 dtype），比对的分母；
+#   * @@FN@@_fp32 —— 纯 fp32 标杆（P 不量化、输出 float32），ATK 的 cpu_benchmark/Actual 参照。
+BENCHMARK_DOUBLE = '''"""MLA CPU 双标杆 for @@IFACE@@ (@@CAT@@).
 
-    ATK 的普通 tensor 输入只接受 [min, max] 取值区间（data_torch.py 对长度为 2 的 list
-    走随机生成），因此 cu_seqlens / page_table / seqused_k 这类索引张量必须用 fixed。
+两个入口：
+  * @@FN@@      —— 低精度标杆：P=exp 按用例 dtype 量化、fp32 累加、输出用例 dtype；
+  * @@FN@@_fp32 —— 纯 fp32 标杆：P 不做低精度量化（fp32 计算），输出随输入 dtype。
+
+低精度标杆复现内核链路（量化「未归一化的 exp」而不是 softmax 归一化后的概率），
+fp32 标杆故意不复现量化，用作高精度参照（ATK 的 cpu_benchmark 就是它）。
+两者的输出 dtype 都跟随输入（ATK 的 benchmark 任务会把 bf16/fp16 输入升到 fp32），
+由 execute 在返回前统一回落到用例 dtype：比较器不允许两侧 dtype 不同（fp32 参照 vs
+bf16 候选会直接报 "The dtypes of local and remote are different"）。
+"""
+
+import torch
+
+BLOCK = 128
+
+
+def _mask(sq, sk, causal, window_size):
+    left, right = window_size
+    if sk > 0 and left >= sk - 1:
+        left = -1
+    if sq > 0 and right >= sq - 1:
+        right = -1
+    if causal:
+        right = 0
+    if left < 0 and right == 0:
+        return torch.triu(torch.ones(sq, sk, dtype=torch.bool), diagonal=sk - sq + 1)
+    if left < 0 and right <= 0:
+        return None
+    q_pos = torch.arange(sq)[:, None]
+    k_pos = torch.arange(sk)[None, :]
+    center = q_pos + sk - sq
+    return ((left >= 0) & (k_pos < center - left)) | ((right >= 0) & (k_pos > center + right))
+
+
+def _paged(cache, table):
+    blocks = [cache[int(p)] for p in table if int(p) >= 0]
+    if not blocks:
+        return cache[:0]
+    return torch.cat(blocks, dim=0)
+
+
+def _core(q, k, v, qv, scale, causal, window_size, length, quantize=True):
+    """q/k/v: [S, H, D] single sequence; length: valid KV rows (None = all).
+
+    quantize=True 复现内核的 P 量化；quantize=False 走纯 fp32（不量化）。
     """
-    if values is not None:
-        return {"name": name, "type": "tensor", "required": True, "dtype": f"{dtype}_fixed",
-                "shape": list(shape), "range_values": values, "backward": False,
-                "align_32B": None, "outlier_values": None}
-    return {"name": name, "type": "tensor", "required": True, "dtype": dtype, "shape": list(shape),
-            "range_values": list(rng), "backward": False, "align_32B": None, "outlier_values": None}
-
-
-def _attr(name, dtype, value):
-    return {"name": name, "type": "attr", "required": False, "dtype": dtype, "shape": None,
-            "range_values": value, "backward": False, "align_32B": None, "outlier_values": None}
-
-
-def _attr_tuple(name, value, dtype="int"):
-    return [{"name": name, "type": "attr_tuple", "required": False, "dtype": dtype, "shape": None,
-             "range_values": int(v), "backward": False, "align_32B": None, "outlier_values": None}
-            for v in value]
-
-
-def _seq(lengths):
-    acc, out = 0, [0]
-    for n in lengths:
-        acc += n
-        out.append(acc)
-    return out
-
-
-def _blocks(batch, nblk):
-    """page_table：第 b 个 batch 使用全局页号 b*nblk .. b*nblk+nblk-1。"""
-    return [[b * nblk + i for i in range(nblk)] for b in range(batch)]
-
-
-def build_inputs(iface, spec, precision=BF16):
-    meta = IFACES[iface]
-    form = spec["form"]
-    B, Sq = spec["B"], spec["Sq"]
-    Sk = spec["Sk"]
-    paged = spec.get("paged", False)
-    causal = spec["causal"]
-    window = spec["window"]
-    layout = meta["layout"]
-    inputs = []
-    if form == "prefill":
-        Hq = Hk = 32
-        Dq = Dk = 192
-        Dv = 128
-        qv = None
-    else:
-        Hq, Hk, Dq, Dk, Dv = 32, 1, 64, 64, 512
-        qv = 512
-
-    if meta["kvcache"]:
-        cache_len = Sk
-        if paged:
-            nblk = (cache_len + BLOCK - 1) // BLOCK
-            inputs.append(_tensor("q", precision, (B, Sq, Hq, Dq)))
-            inputs.append(_tensor("k_cache", precision, (B * nblk, BLOCK, Hk, Dk)))
-            inputs.append(_tensor("v_cache", precision, (B * nblk, BLOCK, Hk, Dv)))
-            inputs.append(_tensor("page_table", "int32", (B, nblk), values=_blocks(B, nblk)))
-        else:
-            inputs.append(_tensor("q", precision, (B, Sq, Hq, Dq)))
-            inputs.append(_tensor("k_cache", precision, (B, cache_len, Hk, Dk)))
-            inputs.append(_tensor("v_cache", precision, (B, cache_len, Hk, Dv)))
-        if qv is not None:
-            inputs.append(_tensor("qv", precision, (B, Sq, Hq, Dv)))
-        inputs.append(_attr("cache_seqlens", "int", cache_len))
-        inputs.append(_attr("softmax_scale", "float", SCALE))
-        inputs.append(_attr("causal", "bool", causal))
-        inputs.append(_attr_tuple("window_size", window))
-        return inputs
-
-    if layout == "tnd":
-        Tq = B * Sq
-        Tk = B * Sk
-        cu_q, cu_k = _seq([Sq] * B), _seq([Sk] * B)
-        inputs.append(_tensor("q", precision, (Tq, Hq, Dq)))
-        inputs.append(_tensor("k", precision, (Tk, Hk, Dk)))
-        inputs.append(_tensor("v", precision, (Tk, Hk, Dv)))
-        if qv is not None:
-            inputs.append(_tensor("qv", precision, (Tq, Hq, Dv)))
-        if paged:
-            nblk = (Sk + BLOCK - 1) // BLOCK
-            inputs[1] = _tensor("k", precision, (B * nblk, BLOCK, Hk, Dk))
-            inputs[2] = _tensor("v", precision, (B * nblk, BLOCK, Hk, Dv))
-            inputs.append(_tensor("page_table", "int32", (B, nblk), values=_blocks(B, nblk)))
-            inputs.append(_tensor("seqused_k", "int32", (B,), values=[Sk] * B))
-        inputs.append(_tensor("cu_seqlens_q", "int32", (B + 1,), values=cu_q))
-        if not paged:
-            # paged KV 的契约是 page_table + seqused_k；同时给 cu_seqlens_k 会被内核拒绝
-            # （"If cu_seqlens_k is passed in, then paged table is not supported"）。
-            inputs.append(_tensor("cu_seqlens_k", "int32", (B + 1,), values=cu_k))
-        inputs.append(_attr("max_seqlen_q", "int", Sq))
-        inputs.append(_attr("max_seqlen_k", "int", Sk))
-        inputs.append(_attr("softmax_scale", "float", SCALE))
-        inputs.append(_attr("causal", "bool", causal))
-        inputs.append(_attr_tuple("window_size", window))
-        return inputs
-
-    # BSND plain (fa3_func / fa4_func)
-    inputs.append(_tensor("q", precision, (B, Sq, Hq, Dq)))
-    inputs.append(_tensor("k", precision, (B, Sk, Hk, Dk)))
-    inputs.append(_tensor("v", precision, (B, Sk, Hk, Dv)))
+    qh = q.float().transpose(0, 1)
     if qv is not None:
-        inputs.append(_tensor("qv", precision, (B, Sq, Hq, Dv)))
-    inputs.append(_attr("softmax_scale", "float", SCALE))
-    inputs.append(_attr("causal", "bool", causal))
-    inputs.append(_attr_tuple("window_size", window))
-    return inputs
+        qnh = qv.float().transpose(0, 1)
+        kh = k.float().transpose(0, 1)
+        vh = v.float().transpose(0, 1)
+        scores = (qnh @ vh.transpose(-1, -2) + qh @ kh.transpose(-1, -2)) * scale
+        value = vh
+    else:
+        kh = k.float().transpose(0, 1)
+        vh = v.float().transpose(0, 1)
+        scores = (qh @ kh.transpose(-1, -2)) * scale
+        value = vh
+    if length is not None:
+        scores = scores[..., :length]
+        value = value[..., :length, :]
+    mask = _mask(scores.shape[-2], scores.shape[-1], causal, window_size)
+    if mask is not None:
+        scores = scores + mask.to(scores.dtype) * -1e4
+    # 内核 flash-attention 口径：P = exp(s - max) 先量化到输入精度（内核 Cast 到 PType，
+    # 设备默认 RNE，已实测），再与 V 做 fp32 累加；行和 l 取 fp32 的 exp 之和
+    # （内核 CalcLocalRowSum 用的是 fp32 ls），最后除以 l。低精度标杆必须复现整条链路：
+    # 量化「未归一化的 exp」而不是「softmax 归一化后的概率」，否则近零元素的相对误差会被放大。
+    # fp32 标杆不复现量化，保留 fp32 的 exp 直接累加。
+    e = torch.exp(scores - scores.max(dim=-1, keepdim=True).values)
+    length_sum = e.sum(dim=-1, keepdim=True)
+    probs = e.to(q.dtype).float() if quantize else e
+    if value.shape[0] != probs.shape[0] and probs.shape[0] % value.shape[0] == 0:
+        value = value.repeat_interleave(probs.shape[0] // value.shape[0], dim=0)
+    return (probs @ value / length_sum).transpose(0, 1)
 
 
-def build_user_scenarios(iface, cat):
-    meta = IFACES[iface]
-    kind = CATEGORIES[cat]["kind"]
-    api_type = f"{iface}_mla_{'mem' if kind == 'mem' else 'accuracy'}"
-    # 用户场景 anchor：只保留 usershape.txt 里的两条真实业务 shape。
-    # 这些用例**不走 atk case 生成**，是手写的固定 JSON，由 run_*.sh 串跑、报告单独出。
-    # (form, B, Sq, Sk, causal, window, paged, label)
-    rows = [
-        ("prefill", 1, 198, 198, True, (-1, -1), False, "user_prefill_198"),
-    ]
-    if not prefill_only(iface, cat):
-        # GPU 标杆类别（H200/SM90）跑不了 decode 吸收态，anchor 也去掉这条。
-        rows.append(("decode", 1, 1, 1025, False, (-1, -1), False, "user_decode_1025"))
-    # 每条业务 shape 各出 bf16 / fp16 两个精度，与生成用例的精度覆盖保持一致。
-    cases = []
-    for form, B, Sq, Sk, causal, window, paged, label in rows:
-        for precision in PRECISIONS:
-            cases.append({
-                "id": len(cases), "default_seed": None, "name": f"{meta['pkg']}.{meta['fn']}",
-                "aclnn_name": None, "triton_name": None, "kernel_name": None, "version": "v2.1",
-                "expected_error_msg": None, "api": "pytorch", "api_type": api_type,
-                "aclnn_api_type": "aclnn_function", "triton_api_type": "triton_function",
-                "fusion_api_type": "fusion_function", "fusion_mode": None,
-                "dist_api_type": "dist_function", "kernel_api_type": "kernel_function",
-                "backward": False, "memo": f"{label}_{precision}",
-                "standard": {"acc": {"cv_fused_double_benchmark": {
-                    "max_re_ratio": 2.0, "avg_re_ratio": 1.2, "root_mean_squared_ratio": 1.2}},
-                    "perf": "not_key", "mem": 1.1},
-                "outputs": 1,
-                "inputs": build_inputs(iface, dict(form=form, B=B, Sq=Sq, Sk=Sk, causal=causal,
-                                                  window=window, paged=paged), precision=precision),
-                "acl_json": "", "method_inputs": None, "tensor_input": None, "compute_times": None,
-                "save_name": None, "uuid": None, "downloaded": False, "is_boundary": False,
-                "xrun_cs_name": None, "xrun_data": None, "strategy": None,
-            })
-    return cases
+def _bsnd(q, k, v, qv, scale, causal, window_size, lengths, page_table, quantize=True):
+    outs = []
+    for b in range(q.shape[0]):
+        kb, vb = k[b], v[b]
+        length = int(lengths[b]) if lengths is not None else None
+        if page_table is not None:
+            kb, vb = _paged(k, page_table[b]), _paged(v, page_table[b])
+            kb, vb = kb[:length], vb[:length]
+            length = None
+        outs.append(_core(q[b], kb, vb, None if qv is None else qv[b], scale, causal, window_size,
+                          length, quantize))
+    out = torch.stack(outs)
+    return out.to(q.dtype)
+
+
+def _tnd(q, k, v, qv, cu_q, cu_k, scale, causal, window_size, page_table=None, seqlens=None,
+         quantize=True):
+    outs = []
+    for b in range(len(cu_q) - 1):
+        qs, qe = int(cu_q[b]), int(cu_q[b + 1])
+        kb, vb = k, v
+        if page_table is not None:
+            # paged KV：内核只接受 page_table + seqused_k，每 batch 的 KV 长度取自 seqused_k。
+            kb, vb = _paged(k, page_table[b]), _paged(v, page_table[b])
+            seql = int(seqlens[b])
+            kb, vb = kb[:seql], vb[:seql]
+            ks, ke = 0, seql
+        else:
+            ks, ke = int(cu_k[b]), int(cu_k[b + 1])
+        outs.append(_core(q[qs:qe], kb[ks:ke], vb[ks:ke],
+                          None if qv is None else qv[qs:qe], scale, causal, window_size, None,
+                          quantize))
+    out = torch.cat(outs, dim=0)
+    return out.to(q.dtype)
+
+
+def _run(kw, quantize):
+    q = kw["q"]
+    k = kw.get("k", kw.get("k_cache"))
+    v = kw.get("v", kw.get("v_cache"))
+    qv = kw.get("qv")
+    scale = kw.get("softmax_scale")
+    if scale is None:
+        scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** -0.5
+    causal = bool(kw.get("causal", False))
+    window = tuple(kw.get("window_size") or (-1, -1))
+    if kw.get("cu_seqlens_q") is not None:
+        return _tnd(q, k, v, qv, kw["cu_seqlens_q"], kw.get("cu_seqlens_k"), scale, causal, window,
+                    kw.get("page_table"), kw.get("seqused_k"), quantize)
+    lengths = None
+    if kw.get("cache_seqlens") is not None:
+        cs = kw["cache_seqlens"]
+        lengths = [cs] * q.shape[0] if isinstance(cs, int) else list(cs)
+    if kw.get("seqused_k") is not None:
+        lengths = list(kw["seqused_k"])
+    return _bsnd(q, k, v, qv, scale, causal, window, lengths, kw.get("page_table"), quantize)
+
+
+def @@FN@@(**kw):
+    """低精度标杆：P 按用例 dtype 量化、fp32 累加、输出用例 dtype。"""
+    return _run(kw, True)
+
+
+def @@FN@@_fp32(**kw):
+    """纯 fp32 标杆：P 不做低精度量化（fp32 计算），输出随输入 dtype。"""
+    return _run(kw, False)
+'''
 
 
 # --------------------------------------------------------------------------------------
@@ -900,24 +997,15 @@ def build_yaml(iface, cat, paged=False):
             "#       64  -> decode 吸收态（qv 生效，Hk=1，Dq=64，Dk=64，Dv=512）",
             "#       192 -> prefill（Dq=Dk=192=nope128+rope64，Dv=128，钩子会把 qv 摘掉）",
         ]
-    # fa4 只出 prefill 的说明：double_benchmark 是 GPU 标杆硬件限制；
-    # gpu_mem_compare 已改为 FIA 标杆，这里只为与已验收的用例集合保持一致。
+    # fa4 只出 prefill 的说明：仅 gpu_mem_compare 保留（与已验收的用例集合保持一致）。
     pref_note = []
     if pref:
-        if cat == "gpu_mem_compare":
-            pref_note = [
-                "# 本类别只出 prefill 形状：与已验收的用例集合保持一致（fa4 的 decode 序列长度未做",
-                "# 钉长，直接放大后会超出 500~700MiB 区间）；decode 的覆盖见",
-                "# single_benchmark_cpu / single_benchmark_cann。",
-                "#",
-            ]
-        else:
-            pref_note = [
-                "# GPU 标杆限定：官方 FA4 cute 在 H200(SM90) 上只支持 head_dim_v<=128，",
-                "# decode 吸收态(dv=512) 无法运行，故本类别只出 prefill 形状；",
-                "# decode 的覆盖见 single_benchmark_cpu / single_benchmark_cann。",
-                "#",
-            ]
+        pref_note = [
+            "# 本类别只出 prefill 形状：与已验收的用例集合保持一致（fa4 的 decode 序列长度未做",
+            "# 钉长，直接放大后会超出 500~700MiB 区间）；decode 的覆盖见",
+            "# single_benchmark_cpu / single_benchmark_cann。",
+            "#",
+        ]
     head = [
         f"# {stem}.yaml —— {meta['pkg']}.{meta['fn']} 的 ATK 用例设计文件",
         f"# 类别：{cat}（{cfg['desc']}）{paired}",
@@ -1095,45 +1183,7 @@ class @@CLS@@Constraints(CaseGenerator):
             _fixed(ins["seqused_k"], [kv_len] * batch_pt, shape=[batch_pt])
         if "cache_seqlens" in ins:
             ins["cache_seqlens"].range_values = kv_len
-@@RELAX_MAX@@        return case_config
-'''
-
-
-# double_benchmark/fa3_func 的 Sq==1 退化 prefill 用例放宽 max 判据（见 docs/test/README.md
-# 的「已知口径差异」）。注入到 generate_*.py 的 after_case_config 末尾；standard 是跨用例
-# 共享对象，必须先深拷贝再改，否则会污染全部用例。
-RELAX_MAX = '''
-        # ---- 用例级判据覆盖：仅 Sq==1 的退化 prefill（Dv=128）------------------------
-        # 官方 GPU(FA3) 标杆在单 query 形态上把 max 指标判死：max_re_ratio = 候选最坏单元
-        # 的相对误差 / 标杆最坏单元的相对误差，两个标杆的最坏单元相差一个量级时该比值天然
-        # 放大；Sq==1 时输出退化成 K 个 v 的加权和，近零单元发生抵消，候选的最坏相对误差被
-        # 抵消噪声主导 -> 结构性超阈值，与候选内核精度无关（候选与 CPU 标杆在近零单元上
-        # 近似位级一致，见 docs/test/README.md 的已知口径差异）。
-        # 故仅对该退化形态把 max 门限放宽到 20（对齐 atk_summary 的「A·边际 (2,20] /
-        # B·大误差 (>20)」分档边界，仍拦截大误差档），avg/rms 仍按 1.2 判定，其余用例保持
-        # yaml 里的 2.0。Sq==1 时 causal 对掩码无影响，故不按 causal 过滤。
-        if (not decode) and (q.shape[1] if bsnd else q.shape[0]) == 1:
-            # standard 是跨用例共享的对象，必须深拷贝后再改，否则会污染全部用例
-            case_config.standard = case_config.standard.model_copy(deep=True)
-            case_config.standard.acc["cv_fused_double_benchmark"]["max_re_ratio"] = 20.0
-'''
-
-
-# double_benchmark/fa4_varlen 的全部 prefill 用例放宽 max 判据（见 docs/test/README.md
-# 的「已知口径差异」）。注入点与 RELAX_MAX 相同；standard 是跨用例共享对象，必须先深拷贝。
-RELAX_MAX_FA4VARLEN = '''
-        # ---- 用例级判据覆盖：本接口的全部 prefill -------------------------------------
-        # 官方 GPU(FA4 CuTe) 标杆在部分 prefill 用例上的最坏相对误差比候选/CPU 标杆更小，
-        # 而 max_re_ratio = 候选最坏单元相对误差 / 标杆最坏单元相对误差，两个标杆的最坏单元
-        # 不在同一量级时该比值天然放大（实测 id 11：候选与 fp32 CPU 标杆的最坏相对误差逐位
-        # 相同 = 0.8161180019378662，GPU 标杆仅 0.39152225852012634，比值 2.0845 刚好越界，
-        # 与本候选内核精度无关）。fa4_varlen 在 double_benchmark 里只出 prefill，故对全部
-        # prefill 把 max 门限放宽到 20（对齐 atk_summary 的「A·边际 (2,20] / B·大误差 (>20)」
-        # 分档边界，仍拦截大误差档），avg/rms 仍按 1.2 判定；decode（如后续新增）保持 2.0。
-        if not decode:
-            # standard 是跨用例共享的对象，必须深拷贝后再改，否则会污染全部用例
-            case_config.standard = case_config.standard.model_copy(deep=True)
-            case_config.standard.acc["cv_fused_double_benchmark"]["max_re_ratio"] = 20.0
+        return case_config
 '''
 
 
@@ -1175,57 +1225,46 @@ def main(cats=None):
                 else:
                     pin_tnd = ("            if decode:\n"
                                "                total_q = 8192  # 显存对比：decode 钉长，使体积落入 500~700MiB\n")
-            # double_benchmark 的 max 判据放宽：fa3_func 只放宽 Sq==1 的退化 prefill，
-            # fa4_varlen 放宽全部 prefill（见 RELAX_MAX / RELAX_MAX_FA4VARLEN 的注释）
-            relax_max = ""
-            if cat == "double_benchmark":
-                if iface == "fa3_func":
-                    relax_max = RELAX_MAX
-                elif iface == "fa4_varlen":
-                    relax_max = RELAX_MAX_FA4VARLEN
+            # double_benchmark 已改为同机双 CPU 标杆，用例级 max 放宽（GPU 时代遗留）全部移除，
+            # 判据统一用 yaml 里的 2.0。
             write(idir / f"generate_{iface}{f['sfx']}.py",
                   GENERATE.replace("@@IFACE@@", iface)
                           .replace("@@CLS@@", "".join(p.capitalize() for p in iface.split("_")))
                           .replace("@@PIN_BSND@@", pin_bsnd)
-                          .replace("@@PIN_TND@@", pin_tnd)
-                          .replace("@@RELAX_MAX@@", relax_max))
-            # 3) CPU fp32 golden
-            write(idir / f"benchmark_{iface}{f['sfx']}.py",
-                  BENCHMARK.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
-                          .replace("@@FN@@", f["meta"]["fn"]))
-            # 4) ATK cpu/gpu/npu adapter
-            npu_import = f"from {f['meta']['pkg']} import {f['meta']['fn']} as npu_fn"
-            gpu_import, gpu_fn = GPU_IMPORTS[f["meta"]["gpu"]]
-            gpu_fn = gpu_fn or f["meta"]["fn"]  # fa3/fa4 族：GPU 标杆入口与该接口的 fn 一致
-            write(idir / f"execute_{iface}{f['sfx']}.py",
-                  EXECUTE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
-                         .replace("@@SFX@@", f["sfx"])
-                         .replace("@@FN@@", f["meta"]["fn"]).replace("@@NPU_IMPORT@@", npu_import)
-                         .replace("@@API_TYPE@@", f["api_type"]).replace("@@CLS@@", f["cls"])
-                         .replace("@@BM_NAME@@", f["bm_name"])
-                         .replace("@@GPU_IMPORT@@", gpu_import).replace("@@GPU_FN@@", gpu_fn))
-            # 5) nodes + run 脚本
-            base = stem_of(iface, cat, False)
-            if f["kind"] == "mem":
-                # 显存对比不出用户场景 anchor：小 shape 必然被 MLA 的固定 workspace 抬高峰值，
-                # 与放大后的生成用例口径不一致，反而干扰判读，故整条链路去掉。
-                anchor_doc = "#   4) （显存对比套件不跑用户场景 anchor）"
-                anchor = "# 显存对比套件不出用户场景 anchor：用例全部来自 yaml 生成"
+                          .replace("@@PIN_TND@@", pin_tnd))
+            # 3) CPU golden：double_benchmark 是「fp32 + 低精度」双标杆，其余类别单标杆
+            if cat == "double_benchmark":
+                write(idir / f"benchmark_{iface}.py",
+                      BENCHMARK_DOUBLE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
+                                      .replace("@@FN@@", f["meta"]["fn"]))
             else:
-                anchor_doc = (f"#   4) 最后补跑用户场景 anchor：cases/user_scenarios_{base}.json"
-                              "（报告与上一步分开）")
-                anchor = ('# 用户场景 anchor，单独一个 json，报告与上面的生成用例分开\n'
-                          f'run_case "${{CASE_DIR}}/user_scenarios_{base}.json"')
+                write(idir / f"benchmark_{iface}{f['sfx']}.py",
+                      BENCHMARK.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
+                              .replace("@@FN@@", f["meta"]["fn"]))
+            # 4) ATK adapter：double_benchmark 用按节点名派发的双标杆版本
+            if cat == "double_benchmark":
+                write(idir / f"execute_{iface}.py",
+                      EXECUTE_DOUBLE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
+                                    .replace("@@FN@@", f["meta"]["fn"])
+                                    .replace("@@NPU_PKG@@", f["meta"]["pkg"])
+                                    .replace("@@API_TYPE@@", f["api_type"])
+                                    .replace("@@CLS@@", f["cls"]))
+            else:
+                npu_import = f"from {f['meta']['pkg']} import {f['meta']['fn']} as npu_fn"
+                gpu_import, gpu_fn = GPU_IMPORTS[f["meta"]["gpu"]]
+                gpu_fn = gpu_fn or f["meta"]["fn"]  # fa3/fa4 族：GPU 标杆入口与该接口的 fn 一致
+                write(idir / f"execute_{iface}{f['sfx']}.py",
+                      EXECUTE.replace("@@IFACE@@", iface).replace("@@CAT@@", cat)
+                             .replace("@@SFX@@", f["sfx"])
+                             .replace("@@FN@@", f["meta"]["fn"]).replace("@@NPU_IMPORT@@", npu_import)
+                             .replace("@@API_TYPE@@", f["api_type"]).replace("@@CLS@@", f["cls"])
+                             .replace("@@BM_NAME@@", f["bm_name"])
+                             .replace("@@GPU_IMPORT@@", gpu_import).replace("@@GPU_FN@@", gpu_fn))
+            # 5) nodes + run 脚本
             write(idir / cfg["nodes"], NODES[cfg["nodes"]])
             write(idir / cfg["run"],
                   RUN.format(cat=cat, nodes=cfg["nodes"], bm=cfg["bm"],
-                             tag="multi" if cfg["multi"] else "single",
-                             task=cfg["task"], base=base, desc=cfg["desc"],
-                             anchor=anchor, anchor_doc=anchor_doc))
-            # 6) 用户场景 anchor：手写固定 JSON（不走 atk case），由 run 脚本串跑；mem 类别不出
-            if f["kind"] != "mem":
-                write(ROOT / cat / "cases" / f"user_scenarios_{base}.json",
-                      json.dumps(build_user_scenarios(iface, cat), ensure_ascii=False, indent=1))
+                             task=cfg["task"], desc=cfg["desc"]))
         # 类别级汇总脚本
         write(ROOT / cat / cfg["run"],
               RUN_CAT.format(cat=cat, desc=cfg["desc"], run=cfg["run"],
