@@ -1037,15 +1037,14 @@ def build_yaml(iface, cat, paged=False):
         "",
         "# 判据：cv_fused_double_benchmark（混合容差 atol/rtol）。bf16 的 eps 是 2^-8，",
         "# 阈值 2.0 约等于「最大相对误差 <= 0.78%」；mem 只在 gpu_mem_compare 用得到。",
-        "# root_mean_squared_ratio 同为 2.0：CPU 标杆是 fp32 累加，候选 kernel 是分块在线",
-        "# softmax + 硬件 bf16 GEMM，实测候选相对 fp32 的 RMS 误差约 0.26%（小于 bf16 量化",
-        "# 噪声 0.78%），而标杆只有 0.08%，比值天然在 1.3~1.8 区间，1.2 会误杀正常 bf16 结果。",
+        "# root_mean_squared_ratio 通用值 1.2；double_benchmark 的 bf16 用例由 generate 钩子",
+        "# 单独放宽到 2.0（bf16 尾数只有 fp16 的一半，分母已贴输出舍入下限，见钩子注释）。",
         "standard:",
         "  acc:",
         "    cv_fused_double_benchmark:",
         "      max_re_ratio: 2.0",
         "      avg_re_ratio: 1.2",
-        "      root_mean_squared_ratio: 2.0",
+        "      root_mean_squared_ratio: 1.2",
         "  perf: not_key",
         "  mem: 1.1",
         "shape_distributions: [[0, 1.0]]",
@@ -1186,7 +1185,24 @@ class @@CLS@@Constraints(CaseGenerator):
             _fixed(ins["seqused_k"], [kv_len] * batch_pt, shape=[batch_pt])
         if "cache_seqlens" in ins:
             ins["cache_seqlens"].range_values = kv_len
-        return case_config
+@@BF16_RMS@@        return case_config
+'''
+
+# double_benchmark 专用的用例级 rms 放宽（inject 到 above 的 @@BF16_RMS@@ 处）。
+# 依据（实测，fa4_func id=3 / fa4_varlen id=48）：
+#   * 分母是 CPU bf16 标杆，误差只有 0.2 个 bf16 ulp，已贴在「输出一次舍入」的下限；
+#   * 候选输出 78.6% 元素与标杆逐位相同，其余相差约 1.5 ulp，逐 head 偏差与标杆同量级、
+#     无系统偏置（指纹枚举 9 种低精度管线都解释不了候选输出，排除「某处降精度」）；
+#   * 于是 rms 比例被舍入边界放大到 1.28~1.74，而 fp16 用例全部 ≤0.75（bf16 尾数只有一半）。
+# 处置：仅 bf16 把 root_mean_squared_ratio 放宽到 2.0，fp16 仍 1.2，max 2.0 / avg 1.2 不变。
+RELAX_BF16_RMS = '''        # ---- bf16 的 rms 判据放宽（double_benchmark 专用，见 gen_atk_mla.py）--------
+        # 分母（CPU bf16 标杆）已贴输出舍入下限，比例被舍入边界放大；只放宽 bf16 的 rms。
+        if q.dtype == "bf16" and case_config.standard is not None:
+            std = case_config.standard.model_copy(deep=True)   # standard 跨用例共享，必须深拷
+            acc = std.acc.get("cv_fused_double_benchmark") if isinstance(std.acc, dict) else None
+            if acc is not None:
+                acc["root_mean_squared_ratio"] = 2.0
+                case_config.standard = std
 '''
 
 
@@ -1228,13 +1244,15 @@ def main(cats=None):
                 else:
                     pin_tnd = ("            if decode:\n"
                                "                total_q = 8192  # 显存对比：decode 钉长，使体积落入 500~700MiB\n")
-            # double_benchmark 已改为同机双 CPU 标杆，用例级 max 放宽（GPU 时代遗留）全部移除，
-            # 判据统一用 yaml 里的 2.0。
+            # double_benchmark 的 bf16 用例在钩子里把 rms 放宽到 2.0（见 RELAX_BF16_RMS）；
+            # 其余类别判据全部来自 yaml，不做用例级覆盖。
             write(idir / f"generate_{iface}{f['sfx']}.py",
                   GENERATE.replace("@@IFACE@@", iface)
                           .replace("@@CLS@@", "".join(p.capitalize() for p in iface.split("_")))
                           .replace("@@PIN_BSND@@", pin_bsnd)
-                          .replace("@@PIN_TND@@", pin_tnd))
+                          .replace("@@PIN_TND@@", pin_tnd)
+                          .replace("@@BF16_RMS@@",
+                                   RELAX_BF16_RMS if cat == "double_benchmark" else ""))
             # 3) CPU golden：double_benchmark 是「fp32 + 低精度」双标杆，其余类别单标杆
             if cat == "double_benchmark":
                 write(idir / f"benchmark_{iface}.py",

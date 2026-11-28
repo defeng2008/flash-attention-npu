@@ -125,4 +125,12 @@ class Fa3VarlenConstraints(CaseGenerator):
             _fixed(ins["seqused_k"], [kv_len] * batch_pt, shape=[batch_pt])
         if "cache_seqlens" in ins:
             ins["cache_seqlens"].range_values = kv_len
+        # ---- bf16 的 rms 判据放宽（double_benchmark 专用，见 gen_atk_mla.py）--------
+        # 分母（CPU bf16 标杆）已贴输出舍入下限，比例被舍入边界放大；只放宽 bf16 的 rms。
+        if q.dtype == "bf16" and case_config.standard is not None:
+            std = case_config.standard.model_copy(deep=True)   # standard 跨用例共享，必须深拷
+            acc = std.acc.get("cv_fused_double_benchmark") if isinstance(std.acc, dict) else None
+            if acc is not None:
+                acc["root_mean_squared_ratio"] = 2.0
+                case_config.standard = std
         return case_config
